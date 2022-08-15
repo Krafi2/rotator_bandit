@@ -22,4 +22,7 @@ This will run the agent for 5000 impressions against the data at
 
 ```sh
 $ cargo run --release -- data/ctrs.txt 5000
+
+Accumulated a reward of 240 over the course of 5000 impressions!
+The average regret was 0.9454.
 ```

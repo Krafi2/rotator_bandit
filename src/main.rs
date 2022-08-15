@@ -165,16 +165,22 @@ fn main() {
     let mut rng = DefaultRng::seed_from_u64(SEED);
 
     let mut reward = 0.;
+    let mut max: f32 = 0.;
+    let mut regret = 0.;
     for _ in 0..impressions {
         let a = agent.choose(&mut rng);
         let r = bandit.pull(a);
         agent.update(a, r);
+        max = max.max(r.0);
+        regret += max - r.0;
         reward += r.0;
     }
 
     println!(
-        "Accumulated a reward of {} over the course of {} impressions!",
-        reward, impressions
+        "Accumulated a reward of {} over the course of {} impressions!\nThe average regret was {}.",
+        reward,
+        impressions,
+        regret / impressions as f32
     );
 }
 
