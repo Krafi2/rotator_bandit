@@ -108,11 +108,11 @@ impl Bandit for TestBandit {
     fn pull(&mut self, arm: Action) -> Reward {
         let thumb = &self.data[arm.0];
         if self.rng.gen_bool(thumb.ctr) {
-            // No click
-            Reward(0.)
-        } else {
             // Click
             Reward(1.)
+        } else {
+            // No click
+            Reward(0.)
         }
     }
 }
