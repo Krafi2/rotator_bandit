@@ -137,7 +137,7 @@ fn main() {
     // The input data file
     let input = std::env::args().nth(1).expect("Expected an input argument");
     // How many impressions should be simulated for testing
-    let impressions = std::env::args()
+    let trials = std::env::args()
         .nth(2)
         .expect("Expected an impressions argument")
         .parse::<usize>()
@@ -160,6 +160,7 @@ fn main() {
             })
             .collect::<Vec<_>>();
 
+    let mut impressions = vec![0; thumbnails.len()];
     let mut agent = ThompsonSampler::new(thumbnails.len());
     let mut bandit = TestBandit::new(thumbnails, SEED);
     let mut rng = DefaultRng::seed_from_u64(SEED);
@@ -167,21 +168,27 @@ fn main() {
     let mut reward = 0.;
     let mut max: f32 = 0.;
     let mut regret = 0.;
-    for _ in 0..impressions {
+    for _ in 0..trials {
         let a = agent.choose(&mut rng);
         let r = bandit.pull(a);
         agent.update(a, r);
         max = max.max(r.0);
         regret += max - r.0;
         reward += r.0;
+        impressions[a.0] += 1;
     }
 
     println!(
-        "Accumulated a reward of {} over the course of {} impressions!\nThe average regret was {}.",
+        "Accumulated a reward of {} over the course of {} trials!\nThe average regret was {}.",
         reward,
-        impressions,
-        regret / impressions as f32
+        trials,
+        regret / trials as f32,
     );
+    println!("Impressions:");
+    for (i, imp) in impressions.into_iter().enumerate() {
+        print!(" [{}]: {},", i, imp)
+    }
+    println!("");
 }
 
 /// Get the argmax of a collection
