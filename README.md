@@ -17,12 +17,8 @@ $ cargo build --release
 
 # Running
 
-This will run the agent for 5000 impressions against the data at
-`data/ctrs.txt`:
+This will run the agent with the dataset `data/` nad save results to `output/`.
 
 ```sh
-$ cargo run --release -- data/ctrs.txt 5000
-
-Accumulated a reward of 240 over the course of 5000 impressions!
-The average regret was 0.9454.
+$ cargo run --release -- data/ output/
 ```
