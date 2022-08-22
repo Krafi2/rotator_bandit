@@ -4,13 +4,14 @@ import sys
 input = sys.argv[1]
 output = sys.argv[2]
 
-regret = 0.
-data = []
+x = []
+y = []
 for line in open(input).readlines():
-    data.append(regret)
-    regret += float(line)
+    nums = [float(f) for f in line.split(",")]
+    x.append(nums[0])
+    y.append(nums[1])
 
-plt.plot(data)
+plt.plot(x, y)
 plt.title("Regret")
 plt.xlabel("trials")
 plt.ylabel("regret")

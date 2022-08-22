@@ -5,7 +5,7 @@ use std::{
     cell::Cell,
     fs::File,
     io::{BufRead, BufReader, BufWriter, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -112,28 +112,62 @@ impl Agent for ThompsonSampler {
     }
 }
 
+struct Logger {
+    accumulator: f32,
+    n: u32,
+    samples: u32,
+    file: BufWriter<File>,
+    reward: f32,
+}
+
+impl Logger {
+    fn new(path: &Path, samples: u32) -> Self {
+        let file = File::options()
+            .create(true)
+            .write(true)
+            .open(path)
+            .expect("Failed to open regret file");
+
+        Self {
+            accumulator: 0.,
+            n: 0,
+            samples,
+            file: BufWriter::new(file),
+            reward: 0.,
+        }
+    }
+
+    fn update(&mut self, reward: f32, regret: f32) {
+        if self.n % self.samples == 0 {
+            writeln!(&mut self.file, "{}, {}", self.n, self.accumulator)
+                .expect("Failed to write to file");
+        }
+        self.reward += reward;
+        self.accumulator += regret;
+        self.n += 1;
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 struct RegretLogger<A> {
     agent: A,
-    max: f32,
-    file: Rc<Cell<Option<BufWriter<File>>>>,
+    logger: Rc<Cell<Option<Logger>>>,
 }
 
 impl<A: std::fmt::Debug> std::fmt::Debug for RegretLogger<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegretLogger")
             .field("agent", &self.agent)
-            .field("max", &self.max)
             .finish()
     }
 }
 
 impl<A> RegretLogger<A> {
-    fn new(agent: A, file: Rc<Cell<Option<BufWriter<File>>>>) -> Self {
-        Self {
-            agent,
-            max: 0.,
-            file,
-        }
+    fn new(agent: A, logger: Rc<Cell<Option<Logger>>>) -> Self {
+        Self { agent, logger }
     }
 }
 
@@ -144,11 +178,10 @@ impl<A: Agent> Agent for RegretLogger<A> {
 
     fn update(&mut self, a: Action, r: Reward) {
         self.agent.update(a, r);
-
         let regret = self.agent.optimal().0 - r.0;
-        let mut file = self.file.take().expect("File is in use");
-        writeln!(&mut file, "{}", regret).expect("Failed to write to file");
-        self.file.set(Some(file));
+        let mut logger = self.logger.take().expect("File is in use");
+        logger.update(r.0, regret);
+        self.logger.set(Some(logger));
     }
 
     fn optimal(&self) -> Reward {
@@ -297,8 +330,9 @@ impl Experiment {
 /// A seed to initialize random behaviour
 const SEED: u64 = 0;
 const SHAPE: [u32; 2] = [5, 10];
-const TRIALS: u32 = 1000;
+const TRIALS: u32 = 10000;
 const EXPERIMENTS: u32 = 100;
+const GRAPH_POINTS: u32 = 600;
 
 fn main() {
     // The input data folder
@@ -315,12 +349,10 @@ fn main() {
     }
     std::fs::create_dir(&output).expect("Failed to create output directory");
 
-    let regret = File::options()
-        .create(true)
-        .write(true)
-        .open(output.join("regret.csv"))
-        .expect("Failed to open regret file");
-    let regret = Rc::new(Cell::new(Some(BufWriter::new(regret))));
+    let logger = Rc::new(Cell::new(Some(Logger::new(
+        &output.join("regret.csv"),
+        EXPERIMENTS * TRIALS * SHAPE.iter().product::<u32>() / GRAPH_POINTS,
+    ))));
 
     let videos = std::fs::read_dir(input)
         .expect("Failed to read dir")
@@ -348,7 +380,7 @@ fn main() {
 
             Video {
                 thumbs,
-                agent: RegretLogger::new(agent, regret.clone()),
+                agent: RegretLogger::new(agent, logger.clone()),
                 path,
             }
         })
@@ -397,6 +429,10 @@ fn main() {
 
         println!("Finished experiment {}", e);
     }
+    let mut logger = logger.take().expect("Logfile is in use");
+
+    println!("Total reward: {}", logger.reward);
+    logger.flush().expect("Failed to flush log file");
 
     println!("Generating regret plot...");
 
