@@ -1,5 +1,8 @@
 use image::GenericImageView;
-use rand::{seq::IteratorRandom, Rng, SeedableRng};
+use rand::{
+    seq::{IteratorRandom, SliceRandom},
+    Rng, SeedableRng,
+};
 use rand_distr::{Beta, Distribution};
 use std::{
     cell::Cell,
@@ -131,7 +134,7 @@ impl Logger {
         Self {
             accumulator: 0.,
             n: 0,
-            samples,
+            samples: samples.max(1),
             file: BufWriter::new(file),
             reward: 0.,
         }
@@ -227,25 +230,78 @@ impl Video {
 struct VideoId(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ThumbId(VideoId, usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellId(usize);
+
+#[derive(Debug, Clone)]
+struct Clickability {
+    clicks: u32,
+    impressions: u32,
+    ratio: f32,
+}
+
+impl Default for Clickability {
+    fn default() -> Self {
+        Self {
+            clicks: 0,
+            impressions: 0,
+            ratio: 0.,
+        }
+    }
+}
+
+impl Clickability {
+    fn click(&mut self, click: bool) {
+        self.clicks += click as u32;
+        self.impressions += 1;
+        self.ratio = self.clicks as f32 / self.impressions as f32;
+    }
+
+    fn ratio(&self) -> f32 {
+        self.ratio.max(0.)
+    }
+}
 
 struct Experiment {
+    // Video data
     videos: Vec<Video>,
+    // Number of trials per experiment
     trials: u32,
+    // Shape of the rotator
     shape: [u32; 2],
+    // Estimate of the clickability matrix
+    click_estimate: Vec<Clickability>,
+    // The real clickability matrix
+    clickability: Vec<f32>,
+    // Probabity of a test trial
+    test_prob: f64,
     rng: DefaultRng,
 }
 
 impl Experiment {
-    fn update_thumb(&mut self, id: ThumbId, click: bool) {
+    fn update_thumb(&mut self, thumb: ThumbId, cell: CellId, click: bool, test: bool) {
+        // Update clickability
+        if test {
+            self.click_estimate[cell.0].click(click);
+        }
+
+        // Update thumbnail data
+        let vid = &mut self.videos[thumb.0 .0];
+        vid.thumbs[thumb.1].impress(click);
+
+        // Update agent
         let reward = if click { 1. } else { 0. };
-        let vid = &mut self.videos[id.0 .0];
-        vid.thumbs[id.1].impress(click);
-        vid.agent.update(Action(id.1), Reward(reward));
+        vid.agent.update(Action(thumb.1), Reward(reward));
     }
 
-    fn update(&mut self, mut impressions: Vec<ThumbId>, mut clicks: Vec<ThumbId>) {
-        impressions.sort_unstable_by_key(|ThumbId(vid, _)| *vid);
-        clicks.sort_unstable_by_key(|ThumbId(vid, _)| *vid);
+    fn update(
+        &mut self,
+        mut impressions: Vec<(ThumbId, CellId)>,
+        mut clicks: Vec<(ThumbId, CellId)>,
+        test: bool,
+    ) {
+        impressions.sort_unstable_by_key(|(ThumbId(vid, _), _)| *vid);
+        clicks.sort_unstable_by_key(|(ThumbId(vid, _), _)| *vid);
         let mut c = 0;
         let mut i = 0;
 
@@ -256,8 +312,8 @@ impl Experiment {
                 (None, Some(_)) => panic!("Click not contained in impressions"),
                 // We ran out of clicks, so lets speed through the remaining imressions
                 (Some(_), None) => {
-                    for &id in &impressions[i..] {
-                        self.update_thumb(id, false);
+                    for &(thumb, cell) in &impressions[i..] {
+                        self.update_thumb(thumb, cell, false, test);
                     }
                     break;
                 }
@@ -267,15 +323,15 @@ impl Experiment {
                 (None, None) => break,
             };
 
-            match imp.0.cmp(&click.0) {
+            match imp.0 .0.cmp(&click.0 .0) {
                 // Not a click
                 std::cmp::Ordering::Less => {
-                    self.update_thumb(imp, false);
+                    self.update_thumb(imp.0, imp.1, false, test);
                     i += 1;
                 }
                 // Click
                 std::cmp::Ordering::Equal => {
-                    self.update_thumb(click, true);
+                    self.update_thumb(click.0, click.1, true, test);
                     i += 1;
                     c += 1;
                 }
@@ -287,13 +343,18 @@ impl Experiment {
         }
     }
 
-    fn generate_impressions(&mut self) -> (Vec<ThumbId>, Vec<(ThumbId, f64)>) {
+    fn generate_impressions(&mut self) -> (Vec<(ThumbId, CellId)>, Vec<((ThumbId, CellId), f64)>) {
         let n = self.shape.iter().product::<u32>() as usize;
+
         // Pick the videos that will be displayed
-        self.videos
+        let mut videos = self
+            .videos
             .iter_mut()
             .enumerate()
-            .choose_multiple(&mut self.rng, n)
+            .choose_multiple(&mut self.rng, n);
+        videos.shuffle(&mut self.rng);
+
+        let (_, impressions, probs) = videos
             .into_iter()
             .map(|(id, vid)| {
                 let thumb = vid.agent.choose(&mut self.rng).0;
@@ -301,23 +362,31 @@ impl Experiment {
                 (ThumbId(VideoId(id), thumb), ctr)
             })
             .fold(
-                (Vec::new(), Vec::new()),
-                |(mut impress, mut probs), (id, ctr)| {
-                    impress.push(id);
-                    probs.push((id, ctr));
-                    (impress, probs)
+                (0, Vec::new(), Vec::new()),
+                |(cell, mut impress, mut probs), (id, ctr)| {
+                    let imp = (id, CellId(cell));
+                    impress.push(imp);
+                    probs.push((imp, ctr));
+                    (cell + 1, impress, probs)
                 },
-            )
+            );
+        (impressions, probs)
     }
 
     fn run_trial(&mut self) {
         let (impressions, probs) = self.generate_impressions();
         let clicks = probs
             .into_iter()
-            .filter_map(|(id, prob)| self.rng.gen_bool(prob).then_some(id))
+            .filter_map(|((thumb, cell), prob)| {
+                self.rng
+                    .gen_bool(prob * self.clickability[cell.0] as f64)
+                    .then_some((thumb, cell))
+            })
             .collect();
 
-        self.update(impressions, clicks)
+        let test = self.rng.gen_bool(self.test_prob);
+
+        self.update(impressions, clicks, test)
     }
 
     fn run(&mut self) {
@@ -333,6 +402,7 @@ const SHAPE: [u32; 2] = [5, 10];
 const TRIALS: u32 = 10000;
 const EXPERIMENTS: u32 = 100;
 const GRAPH_POINTS: u32 = 600;
+const TEST_PROB: f64 = 1.;
 
 fn main() {
     // The input data folder
@@ -398,10 +468,17 @@ fn main() {
 
     let rng = DefaultRng::seed_from_u64(SEED);
 
+    let mat_len = SHAPE.iter().product::<u32>() as usize;
+
     let mut experiment = Experiment {
         videos,
         trials: TRIALS,
         shape: SHAPE,
+        click_estimate: vec![Clickability::default(); mat_len],
+        clickability: (1..=mat_len)
+            .map(|i| 1. - (i as f32 / mat_len as f32).sqrt())
+            .collect(),
+        test_prob: TEST_PROB,
         rng,
     };
 
@@ -409,7 +486,7 @@ fn main() {
         experiment.run();
         let (impressions, _) = experiment.generate_impressions();
 
-        let sample_thumb = impressions[0];
+        let sample_thumb = impressions[0].0;
         let sample_thumb =
             image::open(experiment.videos[sample_thumb.0 .0].thumb_path(sample_thumb))
                 .expect("Failed to read image");
@@ -421,7 +498,7 @@ fn main() {
         for y in 0..height {
             for x in 0..width {
                 let n = y * width + x;
-                let id = impressions[n as usize];
+                let id = impressions[n as usize].0;
                 let path = experiment.videos[id.0 .0].thumb_path(id);
                 let thumb = image::open(path).expect("Failed to read image").into_rgb8();
                 image::imageops::overlay(
@@ -443,6 +520,30 @@ fn main() {
 
     println!("Total reward: {}", logger.reward);
     logger.flush().expect("Failed to flush log file");
+
+    // Normalize clickability estimates
+    let max = experiment
+        .click_estimate
+        .iter()
+        .map(Clickability::ratio)
+        .reduce(f32::max)
+        .unwrap()
+        .max(f32::EPSILON);
+    let click_estimate = experiment
+        .click_estimate
+        .iter()
+        .map(|click| click.ratio() / max);
+
+    println!("Clickability matrix estimate:");
+    println!("N | real | estimate");
+    for (i, (real, estimate)) in experiment
+        .clickability
+        .into_iter()
+        .zip(click_estimate)
+        .enumerate()
+    {
+        println!("{:02} | {:.5} | {:.5}", i, real, estimate);
+    }
 
     println!("Generating regret plot...");
 
