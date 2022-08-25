@@ -344,10 +344,20 @@ fn main() {
         .parse::<PathBuf>()
         .unwrap();
 
+    // Only clean the output folder if the path is relative to avoid accidentaly deleting important
+    // files.
     if output.exists() && output.is_relative() {
-        std::fs::remove_dir_all(&output).expect("Failed to clean output dir")
+        for entry in std::fs::read_dir(&output).expect("Failed to open output directory") {
+            if let Ok(entry) = entry {
+                // Delete only the thumbnail files
+                if entry.file_name().to_string_lossy().contains("thumbnails-") {
+                    if let Err(err) = std::fs::remove_file(entry.path()) {
+                        eprintln!("Error removing file: {}", err);
+                    }
+                }
+            }
+        }
     }
-    std::fs::create_dir(&output).expect("Failed to create output directory");
 
     let logger = Rc::new(Cell::new(Some(Logger::new(
         &output.join("regret.csv"),
