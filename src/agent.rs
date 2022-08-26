@@ -1,3 +1,4 @@
+use crate::experiment::DefaultRng;
 use rand_distr::{Beta, Distribution};
 use std::{
     cell::Cell,
@@ -18,7 +19,7 @@ pub struct Reward(pub f32);
 /// A common trait for all agents
 pub trait Agent {
     /// Choose an action
-    fn choose<G: rand::Rng>(&mut self, rng: &mut G) -> Action;
+    fn choose(&mut self, rng: &mut DefaultRng) -> Action;
     /// Update the agent with the result of an action
     fn update(&mut self, a: Action, r: Reward);
     /// Get the expected optimal reward
@@ -55,7 +56,7 @@ impl Default for BetaParams {
 }
 
 /// An agent which uses beta thompson sampling to
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ThompsonSampler {
     /// The params for the distributions
     dist_params: Vec<BetaParams>,
@@ -66,17 +67,18 @@ pub struct ThompsonSampler {
 
 impl ThompsonSampler {
     /// Construct a new `ThompsonSampler`
-    pub fn new(arms: usize) -> Self {
+    pub fn new(arms: usize, alpha: f32, beta: f32) -> Self {
+        let params = BetaParams { alpha, beta };
         Self {
-            dist_params: vec![BetaParams::default(); arms],
-            dist: vec![BetaParams::default().new_dist(); arms],
-            optimal: (0, BetaParams::default().mean()),
+            dist_params: vec![params.clone(); arms],
+            dist: vec![params.new_dist(); arms],
+            optimal: (0, params.mean()),
         }
     }
 }
 
 impl Agent for ThompsonSampler {
-    fn choose<G: rand::Rng>(&mut self, rng: &mut G) -> Action {
+    fn choose(&mut self, rng: &mut DefaultRng) -> Action {
         let a = arg_max(self.dist.iter().map(|dist| dist.sample(rng)));
         Action(a)
     }
@@ -166,7 +168,7 @@ impl<A> RegretLogger<A> {
 }
 
 impl<A: Agent> Agent for RegretLogger<A> {
-    fn choose<G: rand::Rng>(&mut self, rng: &mut G) -> Action {
+    fn choose(&mut self, rng: &mut DefaultRng) -> Action {
         self.agent.choose(rng)
     }
 

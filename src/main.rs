@@ -1,8 +1,9 @@
 mod agent;
 mod experiment;
+mod optimizer;
 
 use crate::experiment::{Clickability, Experiment, Thumbnail, Video};
-use agent::{RegretLogger, ThompsonSampler};
+use agent::{Agent, RegretLogger, ThompsonSampler};
 use image::GenericImageView;
 use std::{
     cell::Cell,
@@ -20,34 +21,88 @@ const EXPERIMENTS: u32 = 1;
 const GRAPH_POINTS: u32 = 600;
 const TEST_PROB: f64 = 1.;
 
+enum Op {
+    Optimize,
+    Experiment,
+}
+
 fn main() {
+    let mut args = std::env::args();
+    let _ = args.next();
+
+    let op = args
+        .next()
+        .map(|op| match op.as_str() {
+            "optimize" => Op::Optimize,
+            other => panic!("Unrecognized operation '{}'", other),
+        })
+        .unwrap_or(Op::Experiment);
+
+    match op {
+        Op::Optimize => optimize(args),
+        Op::Experiment => experiment(args),
+    }
+}
+
+fn optimize(mut args: std::env::Args) {
     // The input data folder
-    let input = std::env::args().nth(1).expect("Expected an input argument");
+    let input = args
+        .next()
+        .expect("Expected an input argument")
+        .parse::<PathBuf>()
+        .unwrap();
+
     // The output data folder
-    let output = std::env::args()
-        .nth(2)
+    let output = args
+        .next()
+        .expect("Expected an output argument")
+        .parse::<PathBuf>()
+        .unwrap();
+
+    let videos = load_data(input.as_ref())
+        .map(|(path, thumbs)| {
+            let agent = ThompsonSampler::new(thumbs.len(), 1., 1.);
+            Video::new(thumbs, agent, path)
+        })
+        .collect();
+
+    let clickability = clickability(SHAPE);
+    let experiment = Experiment::new(videos, SHAPE, TRIALS, clickability, TEST_PROB, SEED);
+}
+
+fn experiment(mut args: std::env::Args) {
+    // The input data folder
+    let input = args
+        .next()
+        .expect("Expected an input argument")
+        .parse::<PathBuf>()
+        .unwrap();
+
+    // The output data folder
+    let output = args
+        .next()
         .expect("Expected an output argument")
         .parse::<PathBuf>()
         .unwrap();
 
     // Prepare the output directory
-    if output.exists() {
-        // Only clean the output folder if the path is relative to avoid accidentaly deleting important
-        // files.
-        if output.is_relative() {
-            for entry in std::fs::read_dir(&output).expect("Failed to open output directory") {
-                if let Ok(entry) = entry {
-                    // Delete only the thumbnail files
-                    if entry.file_name().to_string_lossy().contains("thumbnails-") {
-                        if let Err(err) = std::fs::remove_file(entry.path()) {
-                            eprintln!("Error removing file: {}", err);
-                        }
+    if !output.exists() {
+        std::fs::create_dir(&output).expect("Failed to create output directory");
+    }
+
+    // Only clean the output folder if the path is relative to avoid accidentaly deleting important
+    // files.
+    if output.is_relative() {
+        for entry in std::fs::read_dir(&output).expect("Failed to open output directory") {
+            if let Ok(entry) = entry {
+                // Delete only the thumbnail files
+                if entry.file_name().to_string_lossy().contains("thumbnails-") {
+                    if let Err(err) = std::fs::remove_file(entry.path()) {
+                        eprintln!("Error removing file: {}", err);
                     }
                 }
             }
         }
-    } else {
-        std::fs::create_dir(&output).expect("Failed to create output directory");
     }
 
     let logger = Rc::new(Cell::new(Some(agent::Logger::new(
@@ -57,15 +112,12 @@ fn main() {
 
     let videos = load_data(input.as_ref())
         .map(|(path, thumbs)| {
-            let agent = ThompsonSampler::new(thumbs.len());
+            let agent = ThompsonSampler::new(thumbs.len(), 1., 1.);
             Video::new(thumbs, RegretLogger::new(agent, logger.clone()), path)
         })
         .collect();
 
-    let mat_len = SHAPE.iter().product::<u32>() as usize;
-    let clickability = (0..mat_len)
-        .map(|i| 1. - 0.9 * (i as f32 / mat_len as f32).sqrt())
-        .collect();
+    let clickability = clickability(SHAPE);
     let mut experiment = Experiment::new(videos, SHAPE, TRIALS, clickability, TEST_PROB, SEED);
 
     for e in 0..EXPERIMENTS {
@@ -144,7 +196,14 @@ fn load_data(input: &Path) -> impl Iterator<Item = (PathBuf, Vec<Thumbnail>)> {
         })
 }
 
-fn rotator_snapshot(experiment: &mut Experiment) -> image::RgbImage {
+fn clickability(shape: [u32; 2]) -> Vec<f32> {
+    let mat_len = SHAPE.iter().product::<u32>() as usize;
+    (0..mat_len)
+        .map(|i| 1. - 0.9 * (i as f32 / mat_len as f32).sqrt())
+        .collect()
+}
+
+fn rotator_snapshot<A: Agent>(experiment: &mut Experiment<A>) -> image::RgbImage {
     let (impressions, _) = experiment.generate_impressions();
 
     let sample_thumb = impressions[0].0;

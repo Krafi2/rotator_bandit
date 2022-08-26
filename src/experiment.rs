@@ -5,10 +5,10 @@ use rand::{
 };
 use std::path::PathBuf;
 
-type DefaultRng = rand_chacha::ChaCha8Rng;
+pub type DefaultRng = rand_chacha::ChaCha8Rng;
 
 /// The data of a thumbnail
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Thumbnail {
     /// The id of the thumbnail
     pub id: u32,
@@ -37,19 +37,34 @@ impl Thumbnail {
     }
 }
 
-#[derive(Debug)]
-pub struct Video {
+pub struct Video<A> {
     thumbs: Vec<Thumbnail>,
-    agent: RegretLogger<ThompsonSampler>,
+    agent: A,
     path: PathBuf,
 }
 
-impl Video {
-    pub fn new(
-        thumbs: Vec<Thumbnail>,
-        agent: RegretLogger<ThompsonSampler>,
-        path: PathBuf,
-    ) -> Self {
+impl<A: Clone> Clone for Video<A> {
+    fn clone(&self) -> Self {
+        Self {
+            thumbs: self.thumbs.clone(),
+            agent: self.agent.clone(),
+            path: self.path.clone(),
+        }
+    }
+}
+
+impl<A: std::fmt::Debug> std::fmt::Debug for Video<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Video")
+            .field("thumbs", &self.thumbs)
+            .field("agent", &self.agent)
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl<A> Video<A> {
+    pub fn new(thumbs: Vec<Thumbnail>, agent: A, path: PathBuf) -> Self {
         Self {
             thumbs,
             agent,
@@ -59,6 +74,14 @@ impl Video {
 
     pub fn thumb_path(&self, id: ThumbId) -> PathBuf {
         self.path.join(format!("{:02}.png", self.thumbs[id.1].id))
+    }
+
+    pub fn replace_agent(&mut self, agent: A) -> A {
+        std::mem::replace(&mut self.agent, agent)
+    }
+
+    pub fn thumbs(&self) -> &[Thumbnail] {
+        self.thumbs.as_ref()
     }
 }
 
@@ -106,9 +129,9 @@ impl Clickability {
     }
 }
 
-pub struct Experiment {
+pub struct Experiment<A> {
     // Video data
-    videos: Vec<Video>,
+    videos: Vec<Video<A>>,
     // Shape of the rotator
     shape: [u32; 2],
     // Number of trials per experiment
@@ -119,12 +142,44 @@ pub struct Experiment {
     click_estimate: Vec<Clickability>,
     // Probabity of a test trial
     test_prob: f64,
+    // The accumulated reward
+    reward: f32,
     rng: DefaultRng,
 }
 
-impl Experiment {
+impl<A: std::fmt::Debug> std::fmt::Debug for Experiment<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Experiment")
+            .field("videos", &self.videos)
+            .field("shape", &self.shape)
+            .field("trials", &self.trials)
+            .field("clickability", &self.clickability)
+            .field("click_estimate", &self.click_estimate)
+            .field("test_prob", &self.test_prob)
+            .field("reward", &self.reward)
+            .field("rng", &self.rng)
+            .finish()
+    }
+}
+
+impl<A: Clone> Clone for Experiment<A> {
+    fn clone(&self) -> Self {
+        Self {
+            videos: self.videos.clone(),
+            shape: self.shape.clone(),
+            trials: self.trials.clone(),
+            clickability: self.clickability.clone(),
+            click_estimate: self.click_estimate.clone(),
+            test_prob: self.test_prob.clone(),
+            reward: self.reward.clone(),
+            rng: self.rng.clone(),
+        }
+    }
+}
+
+impl<A: Agent> Experiment<A> {
     pub fn new(
-        videos: Vec<Video>,
+        videos: Vec<Video<A>>,
         shape: [u32; 2],
         trials: u32,
         clickability: Vec<f32>,
@@ -138,6 +193,7 @@ impl Experiment {
             clickability,
             click_estimate: vec![Default::default(); shape.iter().product::<u32>() as usize],
             test_prob,
+            reward: 0.,
             rng: DefaultRng::seed_from_u64(seed),
         }
     }
@@ -155,6 +211,7 @@ impl Experiment {
         // Update agent
         let reward = if click { 1. } else { 0. };
         vid.agent.update(Action(thumb.1), Reward(reward));
+        self.reward += reward;
     }
 
     fn update(
@@ -260,8 +317,12 @@ impl Experiment {
         }
     }
 
-    pub fn videos(&self) -> &[Video] {
+    pub fn videos(&self) -> &[Video<A>] {
         self.videos.as_ref()
+    }
+
+    pub fn videos_mut(&mut self) -> &mut Vec<Video<A>> {
+        &mut self.videos
     }
 
     pub fn clickability(&self) -> &[f32] {
@@ -270,5 +331,9 @@ impl Experiment {
 
     pub fn click_estimate(&self) -> &[Clickability] {
         self.click_estimate.as_ref()
+    }
+
+    pub fn reward(&self) -> f32 {
+        self.reward
     }
 }
