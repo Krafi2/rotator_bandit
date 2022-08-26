@@ -1,406 +1,22 @@
+mod agent;
+mod experiment;
+
+use crate::experiment::{Clickability, Experiment, Thumbnail, Video};
+use agent::{RegretLogger, ThompsonSampler};
 use image::GenericImageView;
-use rand::{
-    seq::{IteratorRandom, SliceRandom},
-    Rng, SeedableRng,
-};
-use rand_distr::{Beta, Distribution};
 use std::{
     cell::Cell,
     fs::File,
-    io::{BufRead, BufReader, BufWriter, Write},
-    path::{Path, PathBuf},
+    io::{BufRead, BufReader},
+    path::PathBuf,
     rc::Rc,
 };
-
-type DefaultRng = rand_chacha::ChaCha8Rng;
-
-/// An action chosen by an agent
-#[derive(Debug, Clone, Copy)]
-struct Action(usize);
-
-/// The reward returned by the environment
-#[derive(Debug, Clone, Copy)]
-struct Reward(f32);
-
-/// A common trait for all bandits
-trait Bandit {
-    /// Pull one of the bandit's arms and receive a reward
-    fn pull(&mut self, arm: Action) -> Reward;
-}
-
-/// A common trait for all agents
-trait Agent {
-    /// Choose an action
-    fn choose<G: rand::Rng>(&mut self, rng: &mut G) -> Action;
-    /// Update the agent with the result of an action
-    fn update(&mut self, a: Action, r: Reward);
-    /// Get the expected optimal reward
-    fn optimal(&self) -> Reward;
-}
-
-/// Parameters for a beta distribution
-#[derive(Debug, Clone)]
-struct BetaParams {
-    alpha: f32,
-    beta: f32,
-}
-
-impl BetaParams {
-    /// Construct a new distribution from the parameters
-    fn new_dist(&self) -> Beta<f32> {
-        Beta::new(self.alpha, self.beta).expect("Invalid parameters for beta distribution")
-    }
-
-    /// The mean of the distribution
-    fn mean(&self) -> f32 {
-        self.alpha / (self.alpha + self.beta)
-    }
-}
-
-impl Default for BetaParams {
-    /// A default beta distribution with alpha and beta of 1.
-    fn default() -> Self {
-        Self {
-            alpha: 1.,
-            beta: 1.,
-        }
-    }
-}
-
-/// An agent which uses beta thompson sampling to
-#[derive(Debug)]
-struct ThompsonSampler {
-    /// The params for the distributions
-    dist_params: Vec<BetaParams>,
-    /// The distributions used to choose actions
-    dist: Vec<Beta<f32>>,
-    optimal: (usize, f32),
-}
-
-impl ThompsonSampler {
-    /// Construct a new `ThompsonSampler`
-    fn new(arms: usize) -> Self {
-        Self {
-            dist_params: vec![BetaParams::default(); arms],
-            dist: vec![BetaParams::default().new_dist(); arms],
-            optimal: (0, BetaParams::default().mean()),
-        }
-    }
-}
-
-impl Agent for ThompsonSampler {
-    fn choose<G: rand::Rng>(&mut self, rng: &mut G) -> Action {
-        let a = arg_max(self.dist.iter().map(|dist| dist.sample(rng)));
-        Action(a)
-    }
-
-    fn update(&mut self, a: Action, r: Reward) {
-        let a = a.0;
-        let r = r.0;
-        let dist = &mut self.dist_params[a];
-        // Update the params
-        dist.alpha += r;
-        dist.beta += 1. - r;
-        let (arm, opt) = self.optimal;
-        let mean = dist.mean();
-        if a == arm || mean > opt {
-            self.optimal = (a, mean);
-        }
-        // Update the distribution
-        self.dist[a] = dist.new_dist();
-    }
-
-    fn optimal(&self) -> Reward {
-        Reward(self.optimal.1)
-    }
-}
-
-struct Logger {
-    accumulator: f32,
-    n: u32,
-    samples: u32,
-    file: BufWriter<File>,
-    reward: f32,
-}
-
-impl Logger {
-    fn new(path: &Path, samples: u32) -> Self {
-        let file = File::options()
-            .create(true)
-            .write(true)
-            .open(path)
-            .expect("Failed to open regret file");
-
-        Self {
-            accumulator: 0.,
-            n: 0,
-            samples: samples.max(1),
-            file: BufWriter::new(file),
-            reward: 0.,
-        }
-    }
-
-    fn update(&mut self, reward: f32, regret: f32) {
-        if self.n % self.samples == 0 {
-            writeln!(&mut self.file, "{}, {}", self.n, self.accumulator)
-                .expect("Failed to write to file");
-        }
-        self.reward += reward;
-        self.accumulator += regret;
-        self.n += 1;
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-struct RegretLogger<A> {
-    agent: A,
-    logger: Rc<Cell<Option<Logger>>>,
-}
-
-impl<A: std::fmt::Debug> std::fmt::Debug for RegretLogger<A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RegretLogger")
-            .field("agent", &self.agent)
-            .finish()
-    }
-}
-
-impl<A> RegretLogger<A> {
-    fn new(agent: A, logger: Rc<Cell<Option<Logger>>>) -> Self {
-        Self { agent, logger }
-    }
-}
-
-impl<A: Agent> Agent for RegretLogger<A> {
-    fn choose<G: rand::Rng>(&mut self, rng: &mut G) -> Action {
-        self.agent.choose(rng)
-    }
-
-    fn update(&mut self, a: Action, r: Reward) {
-        self.agent.update(a, r);
-        let regret = self.agent.optimal().0 - r.0;
-        let mut logger = self.logger.take().expect("File is in use");
-        logger.update(r.0, regret);
-        self.logger.set(Some(logger));
-    }
-
-    fn optimal(&self) -> Reward {
-        self.agent.optimal()
-    }
-}
-
-/// The data of a thumbnail
-#[derive(Debug)]
-struct Thumbnail {
-    /// The id of the thumbnail
-    id: u32,
-    /// Click through ratio
-    ctr: f64,
-    /// The number of clicks that the thumbnail has received
-    clicks: u32,
-    /// The number of impressions that the thumbnail has received
-    impressions: u32,
-}
-
-impl Thumbnail {
-    /// Register an imression
-    fn impress(&mut self, click: bool) {
-        self.impressions += 1;
-        self.clicks += click as u32;
-    }
-}
-
-#[derive(Debug)]
-struct Video {
-    thumbs: Vec<Thumbnail>,
-    agent: RegretLogger<ThompsonSampler>,
-    path: PathBuf,
-}
-
-impl Video {
-    fn thumb_path(&self, id: ThumbId) -> PathBuf {
-        self.path.join(format!("{:02}.png", self.thumbs[id.1].id))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct VideoId(usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ThumbId(VideoId, usize);
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CellId(usize);
-
-#[derive(Debug, Clone)]
-struct Clickability {
-    clicks: u32,
-    impressions: u32,
-    ratio: f32,
-}
-
-impl Default for Clickability {
-    fn default() -> Self {
-        Self {
-            clicks: 0,
-            impressions: 0,
-            ratio: 0.,
-        }
-    }
-}
-
-impl Clickability {
-    fn click(&mut self, click: bool) {
-        self.clicks += click as u32;
-        self.impressions += 1;
-        self.ratio = self.clicks as f32 / self.impressions as f32;
-    }
-
-    fn ratio(&self) -> f32 {
-        self.ratio.max(0.)
-    }
-}
-
-struct Experiment {
-    // Video data
-    videos: Vec<Video>,
-    // Number of trials per experiment
-    trials: u32,
-    // Shape of the rotator
-    shape: [u32; 2],
-    // Estimate of the clickability matrix
-    click_estimate: Vec<Clickability>,
-    // The real clickability matrix
-    clickability: Vec<f32>,
-    // Probabity of a test trial
-    test_prob: f64,
-    rng: DefaultRng,
-}
-
-impl Experiment {
-    fn update_thumb(&mut self, thumb: ThumbId, cell: CellId, click: bool, test: bool) {
-        // Update clickability
-        if test {
-            self.click_estimate[cell.0].click(click);
-        }
-
-        // Update thumbnail data
-        let vid = &mut self.videos[thumb.0 .0];
-        vid.thumbs[thumb.1].impress(click);
-
-        // Update agent
-        let reward = if click { 1. } else { 0. };
-        vid.agent.update(Action(thumb.1), Reward(reward));
-    }
-
-    fn update(
-        &mut self,
-        mut impressions: Vec<(ThumbId, CellId)>,
-        mut clicks: Vec<(ThumbId, CellId)>,
-        test: bool,
-    ) {
-        impressions.sort_unstable_by_key(|(ThumbId(vid, _), _)| *vid);
-        clicks.sort_unstable_by_key(|(ThumbId(vid, _), _)| *vid);
-        let mut c = 0;
-        let mut i = 0;
-
-        // Separate impressions which lead to clicks from these that did not
-        loop {
-            let (&imp, &click) = match (impressions.get(i), clicks.get(c)) {
-                // We received a click that didn't have an impression
-                (None, Some(_)) => panic!("Click not contained in impressions"),
-                // We ran out of clicks, so lets speed through the remaining imressions
-                (Some(_), None) => {
-                    for &(thumb, cell) in &impressions[i..] {
-                        self.update_thumb(thumb, cell, false, test);
-                    }
-                    break;
-                }
-                // Got a click and an impression, proceed to check what to do
-                (Some(imp), Some(click)) => (imp, click),
-                // All done
-                (None, None) => break,
-            };
-
-            match imp.0 .0.cmp(&click.0 .0) {
-                // Not a click
-                std::cmp::Ordering::Less => {
-                    self.update_thumb(imp.0, imp.1, false, test);
-                    i += 1;
-                }
-                // Click
-                std::cmp::Ordering::Equal => {
-                    self.update_thumb(click.0, click.1, true, test);
-                    i += 1;
-                    c += 1;
-                }
-                // Probably a bug
-                std::cmp::Ordering::Greater => {
-                    panic!("Click not contained in impressions")
-                }
-            }
-        }
-    }
-
-    fn generate_impressions(&mut self) -> (Vec<(ThumbId, CellId)>, Vec<((ThumbId, CellId), f64)>) {
-        let n = self.shape.iter().product::<u32>() as usize;
-
-        // Pick the videos that will be displayed
-        let mut videos = self
-            .videos
-            .iter_mut()
-            .enumerate()
-            .choose_multiple(&mut self.rng, n);
-        videos.shuffle(&mut self.rng);
-
-        let (_, impressions, probs) = videos
-            .into_iter()
-            .map(|(id, vid)| {
-                let thumb = vid.agent.choose(&mut self.rng).0;
-                let ctr = vid.thumbs[thumb].ctr;
-                (ThumbId(VideoId(id), thumb), ctr)
-            })
-            .fold(
-                (0, Vec::new(), Vec::new()),
-                |(cell, mut impress, mut probs), (id, ctr)| {
-                    let imp = (id, CellId(cell));
-                    impress.push(imp);
-                    probs.push((imp, ctr));
-                    (cell + 1, impress, probs)
-                },
-            );
-        (impressions, probs)
-    }
-
-    fn run_trial(&mut self) {
-        let (impressions, probs) = self.generate_impressions();
-        let clicks = probs
-            .into_iter()
-            .filter_map(|((thumb, cell), prob)| {
-                self.rng
-                    .gen_bool(prob * self.clickability[cell.0] as f64)
-                    .then_some((thumb, cell))
-            })
-            .collect();
-
-        let test = self.rng.gen_bool(self.test_prob);
-
-        self.update(impressions, clicks, test)
-    }
-
-    fn run(&mut self) {
-        for _ in 0..self.trials {
-            self.run_trial()
-        }
-    }
-}
 
 /// A seed to initialize random behaviour
 const SEED: u64 = 0;
 const SHAPE: [u32; 2] = [5, 10];
-const TRIALS: u32 = 10000;
-const EXPERIMENTS: u32 = 100;
+const TRIALS: u32 = 10000000;
+const EXPERIMENTS: u32 = 1;
 const GRAPH_POINTS: u32 = 600;
 const TEST_PROB: f64 = 1.;
 
@@ -429,7 +45,7 @@ fn main() {
         }
     }
 
-    let logger = Rc::new(Cell::new(Some(Logger::new(
+    let logger = Rc::new(Cell::new(Some(agent::Logger::new(
         &output.join("regret.csv"),
         EXPERIMENTS * TRIALS * SHAPE.iter().product::<u32>() / GRAPH_POINTS,
     ))));
@@ -447,40 +63,21 @@ fn main() {
                     let s = s.expect("Failed to read line");
                     let sub = s.split(',').collect::<Vec<_>>();
 
-                    Thumbnail {
-                        id: sub[0].parse().unwrap(),
-                        ctr: sub[1].parse().unwrap(),
-                        clicks: 0,
-                        impressions: 0,
-                    }
+                    Thumbnail::new(sub[0].parse().unwrap(), sub[1].parse().unwrap())
                 })
                 .collect::<Vec<_>>();
 
             let agent = ThompsonSampler::new(thumbs.len());
 
-            Video {
-                thumbs,
-                agent: RegretLogger::new(agent, logger.clone()),
-                path,
-            }
+            Video::new(thumbs, RegretLogger::new(agent, logger.clone()), path)
         })
         .collect::<Vec<_>>();
 
-    let rng = DefaultRng::seed_from_u64(SEED);
-
     let mat_len = SHAPE.iter().product::<u32>() as usize;
-
-    let mut experiment = Experiment {
-        videos,
-        trials: TRIALS,
-        shape: SHAPE,
-        click_estimate: vec![Clickability::default(); mat_len],
-        clickability: (1..=mat_len)
-            .map(|i| 1. - (i as f32 / mat_len as f32).sqrt())
-            .collect(),
-        test_prob: TEST_PROB,
-        rng,
-    };
+    let clickability = (1..=mat_len)
+        .map(|i| 1. - (i as f32 / mat_len as f32).sqrt())
+        .collect();
+    let mut experiment = Experiment::new(videos, SHAPE, TRIALS, clickability, TEST_PROB, SEED);
 
     for e in 0..EXPERIMENTS {
         experiment.run();
@@ -488,7 +85,7 @@ fn main() {
 
         let sample_thumb = impressions[0].0;
         let sample_thumb =
-            image::open(experiment.videos[sample_thumb.0 .0].thumb_path(sample_thumb))
+            image::open(experiment.videos()[sample_thumb.video()].thumb_path(sample_thumb))
                 .expect("Failed to read image");
         let (img_width, img_height) = sample_thumb.dimensions();
         let [width, height] = SHAPE;
@@ -499,7 +96,7 @@ fn main() {
             for x in 0..width {
                 let n = y * width + x;
                 let id = impressions[n as usize].0;
-                let path = experiment.videos[id.0 .0].thumb_path(id);
+                let path = experiment.videos()[id.video()].thumb_path(id);
                 let thumb = image::open(path).expect("Failed to read image").into_rgb8();
                 image::imageops::overlay(
                     &mut image,
@@ -518,26 +115,26 @@ fn main() {
     }
     let mut logger = logger.take().expect("Logfile is in use");
 
-    println!("Total reward: {}", logger.reward);
+    println!("Total reward: {}", logger.reward());
     logger.flush().expect("Failed to flush log file");
 
     // Normalize clickability estimates
     let max = experiment
-        .click_estimate
+        .click_estimate()
         .iter()
         .map(Clickability::ratio)
         .reduce(f32::max)
         .unwrap()
         .max(f32::EPSILON);
     let click_estimate = experiment
-        .click_estimate
+        .click_estimate()
         .iter()
         .map(|click| click.ratio() / max);
 
     println!("Clickability matrix estimate:");
     println!("N | real | estimate");
     for (i, (real, estimate)) in experiment
-        .clickability
+        .clickability()
         .into_iter()
         .zip(click_estimate)
         .enumerate()
@@ -562,17 +159,4 @@ fn main() {
     }
 
     println!("Done!");
-}
-
-/// Get the argmax of a collection
-fn arg_max<I: IntoIterator>(collection: I) -> usize
-where
-    I::Item: std::cmp::PartialOrd,
-{
-    collection
-        .into_iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("Comparison failed"))
-        .expect("Expected at least one element")
-        .0
 }
