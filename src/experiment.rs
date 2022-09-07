@@ -1,11 +1,10 @@
 use super::agent::{Action, Agent, RegretLogger, Reward, ThompsonSampler};
+use super::DefaultRng;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng, SeedableRng,
 };
 use std::path::PathBuf;
-
-pub type DefaultRng = rand_chacha::ChaCha8Rng;
 
 /// The data of a thumbnail
 #[derive(Debug, Clone)]
