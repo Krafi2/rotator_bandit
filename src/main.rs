@@ -5,11 +5,10 @@ mod optimizer;
 use crate::experiment::{Clickability, Experiment, Thumbnail, Video};
 use agent::{Agent, RegretLogger, ThompsonSampler};
 use image::GenericImageView;
-use std::io::Write;
 use std::{
     cell::Cell,
-    fs::{File, OpenOptions},
-    io::{BufRead, BufReader, BufWriter},
+    fs::File,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -19,16 +18,13 @@ pub type DefaultRng = rand_chacha::ChaCha8Rng;
 /// A seed to initialize random behaviour
 const SEED: u64 = 0;
 const SHAPE: [u32; 2] = [5, 10];
-const TRIALS: u32 = 10_00;
+const TRIALS: u32 = 1000;
 const EXPERIMENTS: u32 = 1;
 const GRAPH_POINTS: u32 = 600;
 const TEST_PROB: f64 = 1.;
 
-const INITIAL_SAMPLES: u32 = 64;
-const SAMPLES: u32 = 2;
-const RETAIN: f64 = 0.5;
-const REFINE: u32 = 0;
-const DOMAIN: [std::ops::Range<f64>; 2] = [0f64..1f64, 0f64..1f64];
+const DOMAIN: [std::ops::Range<f32>; 2] = [0.1..100., 0.1..200.];
+const WIDTH: usize = 64;
 
 enum Op {
     Optimize,
@@ -83,33 +79,19 @@ fn optimize(mut args: std::env::Args) {
     let clickability = clickability(SHAPE);
     let experiment = Experiment::new(videos, SHAPE, TRIALS, clickability, TEST_PROB, SEED);
 
-    let point_path = output.join("optimizer.csv");
-    let mut point_writer = BufWriter::new(
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&point_path)
-            .expect("Failed to open optimizer point cache"),
-    );
-
-    // Compute the total number of samples that will be collected with the given parameters
-    let n = (INITIAL_SAMPLES.pow(2) as f64 * (SAMPLES.pow(2) as f64 * RETAIN).powi(REFINE as i32))
-        as u32;
-    let step = (n / 100).max(1);
+    let step = (DOMAIN[0].end - DOMAIN[0].start) / WIDTH as f32;
+    let height = ((DOMAIN[1].end - DOMAIN[1].start) / step) as usize;
+    let origin = [DOMAIN[0].start, DOMAIN[1].start];
+    let samples = WIDTH * height;
     let mut i = 0;
-    let mut max = 0.;
-    let mut max_point = vec![0.; 2];
 
-    println!("Collecting {n} samples:");
-
-    optimizer::grid_search(&DOMAIN, INITIAL_SAMPLES, SAMPLES, RETAIN, REFINE, |point| {
-        if i % step == 0 {
-            println!("{}%", i / step);
+    println!("Evaluating samples:");
+    println!("0%");
+    let res = optimizer::grid_search(&origin, step, WIDTH, height, |alpha, beta| {
+        if 100 * i / samples != 100 * (i + 1) / samples {
+            println!("{}%", 100 * (i + 1) / samples);
         }
         i += 1;
-
-        let alpha = point[0].powi(4) * 100. + 1e-6;
-        let beta = point[1] * 200. + 1e-6;
 
         let mut experiment = experiment.clone();
         for vid in experiment.videos_mut() {
@@ -117,40 +99,13 @@ fn optimize(mut args: std::env::Args) {
             vid.replace_agent(ThompsonSampler::new(arms, alpha as f32, beta as f32));
         }
         experiment.run();
-        let val = experiment.reward() as f64;
-
-        if val > max {
-            max = val;
-            max_point.clone_from_slice(&point);
-        }
-
-        writeln!(&mut point_writer, "{},{},{val}", point[0], point[1]).unwrap();
-
-        val
+        experiment.reward()
     });
-    point_writer.flush().unwrap();
-
+    res.image
+        .save(output.join("optimizer.png"))
+        .expect("Failed to write image");
     println!("Optimization finished!");
-    println!(
-        "Optimum found at alpha: {}, beta: {}",
-        max_point[0], max_point[1]
-    );
-
-    println!("Generating optimizer plot...");
-    let exit = std::process::Command::new("python3")
-        .args([
-            "scripts/optimizer.py".into(),
-            output.join("optimizer.csv"),
-            output.join("optimizer.png"),
-        ])
-        .spawn()
-        .and_then(|mut child| child.wait())
-        .expect("Failed to generate regret plot");
-
-    if exit.code().is_none() || exit.code().unwrap() != 0 {
-        println!("Optimizer plot generation failed!");
-    }
-    println!("Done!");
+    println!("Optimum found at alpha: {}, beta: {}", res.alpha, res.beta);
 }
 
 fn experiment(mut args: std::env::Args) {
