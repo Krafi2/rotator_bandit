@@ -4,7 +4,10 @@ use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng, SeedableRng,
 };
-use std::path::PathBuf;
+use std::cell::Cell;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// The data of a thumbnail
 #[derive(Debug, Clone)]
@@ -129,6 +132,13 @@ impl Clickability {
     }
 }
 
+pub struct ExperimentOpts {
+    pub seed: u64,
+    pub shape: [u32; 2],
+    pub trials: u32,
+    pub test_prob: f64,
+}
+
 pub struct Experiment<A> {
     // Video data
     videos: Vec<Video<A>>,
@@ -178,23 +188,16 @@ impl<A: Clone> Clone for Experiment<A> {
 }
 
 impl<A: Agent> Experiment<A> {
-    pub fn new(
-        videos: Vec<Video<A>>,
-        shape: [u32; 2],
-        trials: u32,
-        clickability: Vec<f32>,
-        test_prob: f64,
-        seed: u64,
-    ) -> Self {
+    pub fn new(videos: Vec<Video<A>>, clickability: Vec<f32>, opts: ExperimentOpts) -> Self {
         Self {
             videos,
-            shape,
-            trials,
             clickability,
-            click_estimate: vec![Default::default(); shape.iter().product::<u32>() as usize],
-            test_prob,
+            click_estimate: vec![Default::default(); opts.shape.iter().product::<u32>() as usize],
+            shape: opts.shape,
+            trials: opts.trials,
+            test_prob: opts.test_prob,
             reward: 0.,
-            rng: DefaultRng::seed_from_u64(seed),
+            rng: DefaultRng::seed_from_u64(opts.seed),
         }
     }
 
@@ -346,4 +349,164 @@ impl<A: Clone> Experiment<A> {
         }
         self.rng = DefaultRng::seed_from_u64(seed);
     }
+}
+
+pub fn experiment(
+    input: &Path,
+    output: &Path,
+    experiments: u32,
+    graph_points: u32,
+    opts: ExperimentOpts,
+) {
+    // Prepare the output directory
+    if !output.exists() {
+        std::fs::create_dir(&output).expect("Failed to create output directory");
+    }
+
+    // Only clean the output folder if the path is relative to avoid accidentaly deleting important
+    // files.
+    if output.is_relative() {
+        for entry in std::fs::read_dir(&output).expect("Failed to open output directory") {
+            if let Ok(entry) = entry {
+                // Delete only the thumbnail files
+                if entry.file_name().to_string_lossy().contains("thumbnails-") {
+                    if let Err(err) = std::fs::remove_file(entry.path()) {
+                        eprintln!("Error removing file: {}", err);
+                    }
+                }
+            }
+        }
+    }
+
+    let logger = Rc::new(Cell::new(Some(crate::agent::Logger::new(
+        &output.join("regret.csv"),
+        experiments * opts.trials * opts.shape.iter().product::<u32>() / graph_points,
+    ))));
+
+    let videos = load_data(input.as_ref())
+        .map(|(path, thumbs)| {
+            let agent = crate::agent::ThompsonSampler::new(thumbs.len(), 1., 1.);
+            Video::new(
+                thumbs,
+                crate::agent::RegretLogger::new(agent, logger.clone()),
+                path,
+            )
+        })
+        .collect();
+
+    let clickability = clickability(&opts.shape);
+    let mut experiment = Experiment::new(videos, clickability, opts);
+
+    for e in 0..experiments {
+        experiment.run();
+        let img = rotator_snapshot(&mut experiment);
+        img.save(output.join(format!("thumbnails-{:02}.png", e)))
+            .expect("Failed to write thumbnails");
+        println!("Finished experiment {}", e);
+    }
+    let mut logger = logger.take().expect("Logfile is in use");
+
+    println!("Total reward: {}", logger.reward());
+    logger.flush().expect("Failed to flush log file");
+
+    // Normalize clickability estimates
+    let max = experiment
+        .click_estimate()
+        .iter()
+        .map(Clickability::ratio)
+        .reduce(f32::max)
+        .unwrap()
+        .max(f32::EPSILON);
+    let click_estimate = experiment
+        .click_estimate()
+        .iter()
+        .map(|click| click.ratio() / max);
+
+    println!("Clickability matrix estimate:");
+    println!(" N |   real  | estimate");
+    for (i, (real, estimate)) in experiment
+        .clickability()
+        .into_iter()
+        .zip(click_estimate)
+        .enumerate()
+    {
+        println!("{:02} | {:.5} | {:.5}", i, real, estimate);
+    }
+
+    println!("Generating regret plot...");
+
+    let exit = std::process::Command::new("python3")
+        .args([
+            "scripts/regret.py".into(),
+            output.join("regret.csv"),
+            output.join("regret.png"),
+        ])
+        .spawn()
+        .and_then(|mut child| child.wait())
+        .expect("Failed to generate regret plot");
+
+    if exit.code().is_none() || exit.code().unwrap() != 0 {
+        println!("Regret graph generation failed!");
+    }
+
+    println!("Done!");
+}
+
+pub fn load_data(input: &Path) -> impl Iterator<Item = (PathBuf, Vec<Thumbnail>)> {
+    std::fs::read_dir(input)
+        .expect("Failed to read dir")
+        .map(|video| {
+            let path = video.unwrap().path();
+            let ctrs = path.join("ctrs.txt");
+
+            // Parse the thumbnail data from the csv file
+            let thumbs =
+                std::io::BufReader::new(std::fs::File::open(ctrs).expect("Failed to read input"))
+                    .lines()
+                    .map(|s| {
+                        let s = s.expect("Failed to read line");
+                        let sub = s.split(',').collect::<Vec<_>>();
+
+                        Thumbnail::new(sub[0].parse().unwrap(), sub[1].parse().unwrap())
+                    })
+                    .collect::<Vec<_>>();
+            (path, thumbs)
+        })
+}
+
+pub fn clickability(shape: &[u32; 2]) -> Vec<f32> {
+    let mat_len = shape.iter().product::<u32>() as usize;
+    (0..mat_len)
+        .map(|i| f32::powf(0.1, i as f32 / (mat_len - 1) as f32))
+        .collect()
+}
+
+fn rotator_snapshot<A: Agent>(experiment: &mut Experiment<A>) -> image::RgbImage {
+    let (impressions, _) = experiment.generate_impressions();
+
+    let sample_thumb = impressions[0].0;
+    let sample_thumb =
+        image::open(experiment.videos()[sample_thumb.video()].thumb_path(sample_thumb))
+            .expect("Failed to read image");
+    let (img_width, img_height) = image::GenericImageView::dimensions(&sample_thumb);
+    let [width, height] = experiment.shape.clone();
+
+    let mut image = image::RgbImage::new(width * img_width, height * img_height);
+
+    for y in 0..height {
+        for x in 0..width {
+            let n = y * width + x;
+            let id = impressions[n as usize].0;
+            let path = experiment.videos()[id.video()].thumb_path(id);
+            let thumb = image::open(path).expect("Failed to read image").into_rgb8();
+            image::imageops::overlay(
+                &mut image,
+                &thumb,
+                (x * img_width) as i64,
+                (y * img_height) as i64,
+            );
+        }
+    }
+
+    image
 }

@@ -1,3 +1,4 @@
+use crate::DefaultRng;
 use rand_distr::{Beta, Distribution};
 use std::{
     cell::Cell,
@@ -6,8 +7,6 @@ use std::{
     path::Path,
     rc::Rc,
 };
-
-use crate::DefaultRng;
 
 /// An action chosen by an agent
 #[derive(Debug, Clone, Copy)]
