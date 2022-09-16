@@ -1,10 +1,10 @@
 mod agent;
 mod experiment;
-mod optimizer;
 
 use crate::experiment::{Clickability, Experiment, Thumbnail, Video};
 use agent::{Agent, RegretLogger, ThompsonSampler};
 use image::GenericImageView;
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::{
     cell::Cell,
     fs::File,
@@ -17,14 +17,27 @@ pub type DefaultRng = rand_chacha::ChaCha8Rng;
 
 /// A seed to initialize random behaviour
 const SEED: u64 = 0;
+/// The shape of the rotator
 const SHAPE: [u32; 2] = [5, 10];
-const TRIALS: u32 = 1000;
+/// The number of trials per experiment
+const TRIALS: u32 = 10_000;
+/// The number of experiments
 const EXPERIMENTS: u32 = 1;
+/// How many points should be plotted to the graph
 const GRAPH_POINTS: u32 = 600;
+/// Probability of a trial being a test. Currently there is no reason to set it lower than 1 since
+/// all trials sample data randomly based on the probabilities in the dataset.
 const TEST_PROB: f64 = 1.;
 
-const DOMAIN: [std::ops::Range<f32>; 2] = [0.1..100., 0.1..200.];
+/// The domain of alpha and beta params to search
+const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..100., 0.001..100.];
+/// Width of the grid
 const WIDTH: usize = 64;
+/// Height of the grid
+const HEIGHT: usize = 64;
+/// Number of samples per pixel. The experiments are a bit noisy so try to increase this to
+/// decrease noise at the cost of longer run time.
+const SAMPLES: u32 = 1;
 
 enum Op {
     Optimize,
@@ -39,9 +52,10 @@ fn main() {
         .next()
         .map(|op| match op.as_str() {
             "optimize" => Op::Optimize,
+            "experiment" => Op::Experiment,
             other => panic!("Unrecognized operation '{}'", other),
         })
-        .unwrap_or(Op::Experiment);
+        .expect("Expected operation");
 
     match op {
         Op::Optimize => optimize(args),
@@ -79,33 +93,82 @@ fn optimize(mut args: std::env::Args) {
     let clickability = clickability(SHAPE);
     let experiment = Experiment::new(videos, SHAPE, TRIALS, clickability, TEST_PROB, SEED);
 
-    let step = (DOMAIN[0].end - DOMAIN[0].start) / WIDTH as f32;
-    let height = ((DOMAIN[1].end - DOMAIN[1].start) / step) as usize;
+    let width = WIDTH;
+    let height = HEIGHT;
+    let xstep = (DOMAIN[0].end - DOMAIN[0].start) / width as f32;
+    let ystep = (DOMAIN[1].end - DOMAIN[1].start) / height as f32;
     let origin = [DOMAIN[0].start, DOMAIN[1].start];
-    let samples = WIDTH * height;
-    let mut i = 0;
+
+    let arms = SHAPE.into_iter().product::<u32>() as usize;
+    let mut buffer = vec![0.; width * height];
+    let progress = std::sync::atomic::AtomicU32::default();
 
     println!("Evaluating samples:");
     println!("0%");
-    let res = optimizer::grid_search(&origin, step, WIDTH, height, |alpha, beta| {
-        if 100 * i / samples != 100 * (i + 1) / samples {
-            println!("{}%", 100 * (i + 1) / samples);
-        }
-        i += 1;
+    buffer
+        .chunks_mut(width)
+        .enumerate()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .for_each(|(y, row)| {
+            let mut experiment = experiment.clone();
+            let beta = origin[1] + y as f32 * ystep;
+            for (x, val) in row.into_iter().enumerate() {
+                let alpha = origin[0] + x as f32 * xstep;
+                let mut reward = 0.;
+                for sample in 0..SAMPLES {
+                    let agent = ThompsonSampler::new(arms, alpha, beta);
+                    experiment.reset_with_agent(agent, SEED | sample as u64);
+                    experiment.run();
+                    reward += experiment.reward();
+                }
+                *val = reward / SAMPLES as f32;
+            }
+            let progress = progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if 100 * progress / height as u32 != 100 * (progress + 1) / height as u32 {
+                println!("{}%", 100 * (progress + 1) / height as u32);
+            }
+        });
 
-        let mut experiment = experiment.clone();
-        for vid in experiment.videos_mut() {
-            let arms = vid.thumbs().len();
-            vid.replace_agent(ThompsonSampler::new(arms, alpha as f32, beta as f32));
+    let mut min = f32::MAX;
+    let mut max = 0.;
+    let mut max_alpha = 0.;
+    let mut max_beta = 0.;
+    for y in 0..height {
+        let beta = origin[1] + y as f32 * ystep;
+        for x in 0..width {
+            let alpha = origin[0] + x as f32 * xstep;
+            let val = buffer[y * width + x];
+            if val < min {
+                min = val;
+            }
+            if val > max {
+                max = val;
+                max_alpha = alpha;
+                max_beta = beta;
+            }
         }
-        experiment.run();
-        experiment.reward()
-    });
-    res.image
+    }
+
+    let colorscheme = colorous::VIRIDIS;
+    let scale = (max - min).recip();
+    let buffer = buffer
+        .into_iter()
+        .flat_map(|v| {
+            colorscheme
+                .eval_continuous(((v - min) * scale) as f64)
+                .into_array()
+        })
+        .collect();
+
+    let image = image::RgbImage::from_vec(width as u32, height as u32, buffer)
+        .expect("Failed to create image");
+
+    image
         .save(output.join("optimizer.png"))
         .expect("Failed to write image");
     println!("Optimization finished!");
-    println!("Optimum found at alpha: {}, beta: {}", res.alpha, res.beta);
+    println!("Optimum found at alpha: {max_alpha}, beta: {max_beta}");
 }
 
 fn experiment(mut args: std::env::Args) {

@@ -1,4 +1,4 @@
-use super::agent::{Action, Agent, RegretLogger, Reward, ThompsonSampler};
+use super::agent::{Action, Agent, Reward};
 use super::DefaultRng;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -33,6 +33,11 @@ impl Thumbnail {
     fn impress(&mut self, click: bool) {
         self.impressions += 1;
         self.clicks += click as u32;
+    }
+
+    fn reset(&mut self) {
+        self.clicks = 0;
+        self.impressions = 0;
     }
 }
 
@@ -73,14 +78,6 @@ impl<A> Video<A> {
 
     pub fn thumb_path(&self, id: ThumbId) -> PathBuf {
         self.path.join(format!("{:02}.png", self.thumbs[id.1].id))
-    }
-
-    pub fn replace_agent(&mut self, agent: A) -> A {
-        std::mem::replace(&mut self.agent, agent)
-    }
-
-    pub fn thumbs(&self) -> &[Thumbnail] {
-        self.thumbs.as_ref()
     }
 }
 
@@ -125,6 +122,10 @@ impl Clickability {
 
     pub fn ratio(&self) -> f32 {
         self.ratio.max(0.)
+    }
+
+    fn reset(&mut self) {
+        *self = Default::default()
     }
 }
 
@@ -320,10 +321,6 @@ impl<A: Agent> Experiment<A> {
         self.videos.as_ref()
     }
 
-    pub fn videos_mut(&mut self) -> &mut Vec<Video<A>> {
-        &mut self.videos
-    }
-
     pub fn clickability(&self) -> &[f32] {
         self.clickability.as_ref()
     }
@@ -334,5 +331,19 @@ impl<A: Agent> Experiment<A> {
 
     pub fn reward(&self) -> f32 {
         self.reward
+    }
+}
+
+impl<A: Clone> Experiment<A> {
+    pub fn reset_with_agent(&mut self, agent: A, seed: u64) {
+        self.reward = 0.;
+        self.click_estimate.iter_mut().for_each(Clickability::reset);
+        for vid in &mut self.videos {
+            for thumb in &mut vid.thumbs {
+                thumb.reset();
+            }
+            vid.agent = agent.clone();
+        }
+        self.rng = DefaultRng::seed_from_u64(seed);
     }
 }
