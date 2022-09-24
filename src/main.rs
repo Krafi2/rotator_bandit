@@ -13,24 +13,26 @@ const SEED: u64 = 0;
 /// The shape of the rotator
 const SHAPE: [u32; 2] = [5, 10];
 /// The number of trials per experiment
-const TRIALS: u32 = 10_000;
+const TRIALS: u32 = 1_000_000;
 /// The number of experiments
 const EXPERIMENTS: u32 = 1;
 /// How many points should be plotted to the graph
 const GRAPH_POINTS: u32 = 600;
 /// Probability of a trial being a test. Currently there is no reason to set it lower than 1 since
 /// all trials sample data randomly based on the probabilities in the dataset.
-const TEST_PROB: f64 = 1.;
+const TEST_PROB: f64 = 0.01;
+const INITIAL_ALPHA: f32 = 0.17;
+const INITIAL_BETA: f32 = 1.;
 
 /// The domain of alpha and beta params to search
-const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..100., 0.001..100.];
+const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..1., 0.001..200.];
 /// Width of the grid
-const WIDTH: usize = 64;
+const WIDTH: usize = 16;
 /// Height of the grid
 const HEIGHT: usize = 64;
 /// Number of samples per pixel. The experiments are a bit noisy so try to increase this to
 /// decrease noise at the cost of longer run time.
-const SAMPLES: u32 = 1;
+const SAMPLES: u32 = 10;
 
 enum Op {
     Optimize,
@@ -65,6 +67,8 @@ fn main() {
         .unwrap();
 
     let eopts = ExperimentOpts {
+        alpha: INITIAL_ALPHA,
+        beta: INITIAL_BETA,
         seed: SEED,
         shape: SHAPE,
         trials: TRIALS,

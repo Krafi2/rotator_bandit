@@ -1,9 +1,12 @@
+use crate::agent::BetaParams;
+
 use super::agent::{Action, Agent, Reward};
 use super::DefaultRng;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng, SeedableRng,
 };
+use rand_distr::Distribution;
 use std::cell::Cell;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -109,9 +112,9 @@ pub struct Clickability {
 impl Default for Clickability {
     fn default() -> Self {
         Self {
-            clicks: 0,
-            impressions: 0,
-            ratio: 0.,
+            clicks: 1,
+            impressions: 1,
+            ratio: 1.,
         }
     }
 }
@@ -124,11 +127,52 @@ impl Clickability {
     }
 
     pub fn ratio(&self) -> f32 {
-        self.ratio.max(0.)
+        self.ratio
     }
 
     fn reset(&mut self) {
         *self = Default::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Ratings {
+    alpha: f32,
+    beta: f32,
+    dist_params: Vec<BetaParams>,
+    dist: Vec<rand_distr::Beta<f32>>,
+}
+
+impl Ratings {
+    fn new(n: usize, alpha: f32, beta: f32) -> Self {
+        let params = BetaParams { alpha, beta };
+        Self {
+            alpha,
+            beta,
+            dist_params: vec![params.clone(); n],
+            dist: vec![params.new_dist(); n],
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new(self.dist.len(), self.alpha, self.beta)
+    }
+
+    fn update(&mut self, id: VideoId, reward: Reward) {
+        let dist = &mut self.dist_params[id.0];
+        dist.update(reward);
+        self.dist[id.0] = dist.new_dist();
+    }
+
+    fn choose(&self, n: usize, rng: &mut DefaultRng) -> Vec<VideoId> {
+        let mut ratings = self
+            .dist
+            .iter()
+            .enumerate()
+            .map(|(id, dist)| (VideoId(id), dist.sample(rng)))
+            .collect::<Vec<_>>();
+        ratings.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).expect("Unexpected NaN"));
+        ratings[0..n].into_iter().map(|(id, _)| *id).collect()
     }
 }
 
@@ -137,9 +181,12 @@ pub struct ExperimentOpts {
     pub shape: [u32; 2],
     pub trials: u32,
     pub test_prob: f64,
+    pub alpha: f32,
+    pub beta: f32,
 }
 
 pub struct Experiment<A> {
+    ratings: Ratings,
     // Video data
     videos: Vec<Video<A>>,
     // Shape of the rotator
@@ -175,6 +222,7 @@ impl<A: std::fmt::Debug> std::fmt::Debug for Experiment<A> {
 impl<A: Clone> Clone for Experiment<A> {
     fn clone(&self) -> Self {
         Self {
+            ratings: self.ratings.clone(),
             videos: self.videos.clone(),
             shape: self.shape.clone(),
             trials: self.trials.clone(),
@@ -190,6 +238,7 @@ impl<A: Clone> Clone for Experiment<A> {
 impl<A: Agent> Experiment<A> {
     pub fn new(videos: Vec<Video<A>>, clickability: Vec<f32>, opts: ExperimentOpts) -> Self {
         Self {
+            ratings: Ratings::new(videos.len(), opts.alpha, opts.beta),
             videos,
             clickability,
             click_estimate: vec![Default::default(); opts.shape.iter().product::<u32>() as usize],
@@ -202,19 +251,27 @@ impl<A: Agent> Experiment<A> {
     }
 
     fn update_thumb(&mut self, thumb: ThumbId, cell: CellId, click: bool, test: bool) {
-        // Update clickability
-        if test {
-            self.click_estimate[cell.0].click(click);
-        }
-
         // Update thumbnail data
         let vid = &mut self.videos[thumb.0 .0];
         vid.thumbs[thumb.1].impress(click);
 
-        // Update agent
-        let reward = if click { 1. } else { 0. };
-        vid.agent.update(Action(thumb.1), Reward(reward));
+        // Update clickability
+        let clickability = &mut self.click_estimate[cell.0];
+        if test {
+            clickability.click(click)
+        }
+
+        let reward = click as u32 as f32;
         self.reward += reward;
+
+        // Compute the normalized reward
+        let reward = reward / clickability.ratio();
+
+        // Update the video rating
+        self.ratings.update(thumb.0, Reward(reward));
+
+        // Update agent
+        vid.agent.update(Action(thumb.1), Reward(reward));
     }
 
     fn update(
@@ -266,11 +323,8 @@ impl<A: Agent> Experiment<A> {
         }
     }
 
-    pub fn generate_impressions(
-        &mut self,
-    ) -> (Vec<(ThumbId, CellId)>, Vec<((ThumbId, CellId), f64)>) {
+    pub fn generate_test_impressions(&mut self) -> Vec<(ThumbId, CellId)> {
         let n = self.shape.iter().product::<u32>() as usize;
-
         // Pick the videos that will be displayed
         let mut videos = self
             .videos
@@ -279,37 +333,47 @@ impl<A: Agent> Experiment<A> {
             .choose_multiple(&mut self.rng, n);
         videos.shuffle(&mut self.rng);
 
-        let (_, impressions, probs) = videos
+        videos
             .into_iter()
-            .map(|(id, vid)| {
+            .enumerate()
+            .map(|(cell, (id, vid))| {
                 let thumb = vid.agent.choose(&mut self.rng).0;
-                let ctr = vid.thumbs[thumb].ctr;
-                (ThumbId(VideoId(id), thumb), ctr)
+                (ThumbId(VideoId(id), thumb), CellId(cell))
             })
-            .fold(
-                (0, Vec::new(), Vec::new()),
-                |(cell, mut impress, mut probs), (id, ctr)| {
-                    let imp = (id, CellId(cell));
-                    impress.push(imp);
-                    probs.push((imp, ctr));
-                    (cell + 1, impress, probs)
-                },
-            );
-        (impressions, probs)
+            .collect()
+    }
+
+    pub fn generate_impressions(&mut self) -> Vec<(ThumbId, CellId)> {
+        let n = self.shape.iter().product::<u32>() as usize;
+        self.ratings
+            .choose(n, &mut self.rng)
+            .into_iter()
+            .enumerate()
+            .map(|(cell, id)| {
+                let vid = &self.videos[id.0];
+                let thumb = vid.agent.choose(&mut self.rng).0;
+                (ThumbId(id, thumb), CellId(cell))
+            })
+            .collect()
     }
 
     fn run_trial(&mut self) {
-        let (impressions, probs) = self.generate_impressions();
-        let clicks = probs
-            .into_iter()
-            .filter_map(|((thumb, cell), prob)| {
-                self.rng
-                    .gen_bool(prob * self.clickability[cell.0] as f64)
-                    .then_some((thumb, cell))
+        let test = self.rng.gen_bool(self.test_prob);
+        let impressions = if test {
+            self.generate_test_impressions()
+        } else {
+            self.generate_impressions()
+        };
+
+        let clicks = impressions
+            .iter()
+            .copied()
+            .filter(|(thumb, cell)| {
+                self.rng.gen_bool(
+                    self.videos[thumb.0 .0].thumbs[thumb.1].ctr * self.clickability[cell.0] as f64,
+                )
             })
             .collect();
-
-        let test = self.rng.gen_bool(self.test_prob);
 
         self.update(impressions, clicks, test)
     }
@@ -347,6 +411,7 @@ impl<A: Clone> Experiment<A> {
             }
             vid.agent = agent.clone();
         }
+        self.ratings.reset();
         self.rng = DefaultRng::seed_from_u64(seed);
     }
 }
@@ -385,7 +450,7 @@ pub fn experiment(
 
     let videos = load_data(input.as_ref())
         .map(|(path, thumbs)| {
-            let agent = crate::agent::ThompsonSampler::new(thumbs.len(), 1., 1.);
+            let agent = crate::agent::ThompsonSampler::new(thumbs.len(), opts.alpha, opts.beta);
             Video::new(
                 thumbs,
                 crate::agent::RegretLogger::new(agent, logger.clone()),
@@ -482,7 +547,7 @@ pub fn clickability(shape: &[u32; 2]) -> Vec<f32> {
 }
 
 fn rotator_snapshot<A: Agent>(experiment: &mut Experiment<A>) -> image::RgbImage {
-    let (impressions, _) = experiment.generate_impressions();
+    let impressions = experiment.generate_impressions();
 
     let sample_thumb = impressions[0].0;
     let sample_thumb =

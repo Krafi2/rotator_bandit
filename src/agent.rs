@@ -19,7 +19,7 @@ pub struct Reward(pub f32);
 /// A common trait for all agents
 pub trait Agent {
     /// Choose an action
-    fn choose(&mut self, rng: &mut DefaultRng) -> Action;
+    fn choose(&self, rng: &mut DefaultRng) -> Action;
     /// Update the agent with the result of an action
     fn update(&mut self, a: Action, r: Reward);
     /// Get the expected optimal reward
@@ -28,20 +28,26 @@ pub trait Agent {
 
 /// Parameters for a beta distribution
 #[derive(Debug, Clone)]
-struct BetaParams {
-    alpha: f32,
-    beta: f32,
+pub struct BetaParams {
+    pub alpha: f32,
+    pub beta: f32,
 }
 
 impl BetaParams {
     /// Construct a new distribution from the parameters
-    fn new_dist(&self) -> Beta<f32> {
+    pub fn new_dist(&self) -> Beta<f32> {
         Beta::new(self.alpha, self.beta).expect("Invalid parameters for beta distribution")
     }
 
     /// The mean of the distribution
-    fn mean(&self) -> f32 {
+    pub fn mean(&self) -> f32 {
         self.alpha / (self.alpha + self.beta)
+    }
+
+    pub fn update(&mut self, reward: Reward) {
+        let r = reward.0;
+        self.alpha += r;
+        self.beta += 1. - r;
     }
 }
 
@@ -78,18 +84,16 @@ impl ThompsonSampler {
 }
 
 impl Agent for ThompsonSampler {
-    fn choose(&mut self, rng: &mut DefaultRng) -> Action {
+    fn choose(&self, rng: &mut DefaultRng) -> Action {
         let a = arg_max(self.dist.iter().map(|dist| dist.sample(rng)));
         Action(a)
     }
 
     fn update(&mut self, a: Action, r: Reward) {
         let a = a.0;
-        let r = r.0;
         let dist = &mut self.dist_params[a];
         // Update the params
-        dist.alpha += r;
-        dist.beta += 1. - r;
+        dist.update(r);
         let (arm, opt) = self.optimal;
         let mean = dist.mean();
         if a == arm || mean > opt {
@@ -168,7 +172,7 @@ impl<A> RegretLogger<A> {
 }
 
 impl<A: Agent> Agent for RegretLogger<A> {
-    fn choose(&mut self, rng: &mut DefaultRng) -> Action {
+    fn choose(&self, rng: &mut DefaultRng) -> Action {
         self.agent.choose(rng)
     }
 
