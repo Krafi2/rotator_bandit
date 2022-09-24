@@ -541,9 +541,7 @@ pub fn load_data(input: &Path) -> impl Iterator<Item = (PathBuf, Vec<Thumbnail>)
 
 pub fn clickability(shape: &[u32; 2]) -> Vec<f32> {
     let mat_len = shape.iter().product::<u32>() as usize;
-    (0..mat_len)
-        .map(|i| f32::powf(0.1, i as f32 / (mat_len - 1) as f32))
-        .collect()
+    (0..mat_len).map(|i| f32::powf(0.99, i as f32)).collect()
 }
 
 fn rotator_snapshot<A: Agent>(experiment: &mut Experiment<A>) -> image::RgbImage {
