@@ -21,13 +21,13 @@ const GRAPH_POINTS: u32 = 600;
 /// Probability of a trial being a test. Currently there is no reason to set it lower than 1 since
 /// all trials sample data randomly based on the probabilities in the dataset.
 const TEST_PROB: f64 = 0.01;
-const INITIAL_ALPHA: f32 = 0.17;
-const INITIAL_BETA: f32 = 1.;
+const INITIAL_ALPHA: f32 = 0.75;
+const INITIAL_BETA: f32 = 92.;
 
 /// The domain of alpha and beta params to search
-const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..1., 0.001..100.];
+const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..2., 0.001..100.];
 /// Width of the grid
-const WIDTH: usize = 16;
+const WIDTH: usize = 64;
 /// Height of the grid
 const HEIGHT: usize = 64;
 /// Number of samples per pixel. The experiments are a bit noisy so try to increase this to

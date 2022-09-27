@@ -104,34 +104,42 @@ pub struct CellId(usize);
 
 #[derive(Debug, Clone)]
 pub struct Clickability {
-    clicks: u32,
-    impressions: u32,
-    ratio: f32,
-}
-
-impl Default for Clickability {
-    fn default() -> Self {
-        Self {
-            clicks: 1,
-            impressions: 1,
-            ratio: 1.,
-        }
-    }
+    clicks: Vec<u32>,
+    impressions: Vec<u32>,
+    scale: f32,
 }
 
 impl Clickability {
-    fn click(&mut self, click: bool) {
-        self.clicks += click as u32;
-        self.impressions += 1;
-        self.ratio = self.clicks as f32 / self.impressions as f32;
+    fn new(n: usize) -> Self {
+        Self {
+            clicks: vec![1; n],
+            impressions: vec![1; n],
+            scale: 1.,
+        }
     }
 
-    pub fn ratio(&self) -> f32 {
-        self.ratio
+    fn update(&mut self, cell: CellId, click: bool) {
+        let id = cell.0;
+        self.clicks[id] += click as u32;
+        self.impressions[id] += 1;
+        if id == 0 {
+            self.scale = self.clicks[id] as f32 / self.impressions[id] as f32;
+        }
+    }
+
+    pub fn weight(&self, cell: CellId) -> f32 {
+        let id = cell.0;
+        self.impressions[id] as f32 / self.clicks[id] as f32 * self.scale
     }
 
     fn reset(&mut self) {
-        *self = Default::default()
+        for clicks in &mut self.clicks {
+            *clicks = 1;
+        }
+        for imp in &mut self.impressions {
+            *imp = 1;
+        }
+        self.scale = 1.;
     }
 }
 
@@ -196,7 +204,7 @@ pub struct Experiment<A> {
     // The real clickability matrix
     clickability: Vec<f32>,
     // Estimate of the clickability matrix
-    click_estimate: Vec<Clickability>,
+    click_estimate: Clickability,
     // Probabity of a test trial
     test_prob: f64,
     // The accumulated reward
@@ -241,7 +249,7 @@ impl<A: Agent> Experiment<A> {
             ratings: Ratings::new(videos.len(), opts.alpha, opts.beta),
             videos,
             clickability,
-            click_estimate: vec![Default::default(); opts.shape.iter().product::<u32>() as usize],
+            click_estimate: Clickability::new(opts.shape.iter().product::<u32>() as usize),
             shape: opts.shape,
             trials: opts.trials,
             test_prob: opts.test_prob,
@@ -256,22 +264,20 @@ impl<A: Agent> Experiment<A> {
         vid.thumbs[thumb.1].impress(click);
 
         // Update clickability
-        let clickability = &mut self.click_estimate[cell.0];
         if test {
-            clickability.click(click)
+            self.click_estimate.update(cell, click);
         }
 
-        let reward = click as u32 as f32;
-        self.reward += reward;
+        self.reward += click as u32 as f32;
 
         // Compute the normalized reward
-        let reward = reward / clickability.ratio();
+        let reward = Reward(click, self.click_estimate.weight(cell));
 
         // Update the video rating
-        self.ratings.update(thumb.0, Reward(reward));
+        self.ratings.update(thumb.0, reward);
 
         // Update agent
-        vid.agent.update(Action(thumb.1), Reward(reward));
+        vid.agent.update(Action(thumb.1), reward);
     }
 
     fn update(
@@ -392,8 +398,8 @@ impl<A: Agent> Experiment<A> {
         self.clickability.as_ref()
     }
 
-    pub fn click_estimate(&self) -> &[Clickability] {
-        self.click_estimate.as_ref()
+    pub fn click_estimate(&self) -> &Clickability {
+        &self.click_estimate
     }
 
     pub fn reward(&self) -> f32 {
@@ -408,7 +414,7 @@ impl<A: Agent> Experiment<A> {
 impl<A: Clone> Experiment<A> {
     pub fn reset_with_agent(&mut self, agent: A, seed: u64) {
         self.reward = 0.;
-        self.click_estimate.iter_mut().for_each(Clickability::reset);
+        self.click_estimate.reset();
         for vid in &mut self.videos {
             for thumb in &mut vid.thumbs {
                 thumb.reset();
@@ -447,9 +453,10 @@ pub fn experiment(
         }
     }
 
+    let rot_len = opts.shape.iter().product::<u32>();
     let logger = Rc::new(Cell::new(Some(crate::agent::Logger::new(
         &output.join("regret.csv"),
-        experiments * opts.trials * opts.shape.iter().product::<u32>() / graph_points,
+        experiments * opts.trials * rot_len / graph_points,
     ))));
 
     let videos = load_data(input.as_ref())
@@ -478,18 +485,14 @@ pub fn experiment(
     println!("Total reward: {}", logger.reward());
     logger.flush().expect("Failed to flush log file");
 
-    // Normalize clickability estimates
-    let max = experiment
-        .click_estimate()
-        .iter()
-        .map(Clickability::ratio)
-        .reduce(f32::max)
-        .unwrap()
-        .max(f32::EPSILON);
-    let click_estimate = experiment
-        .click_estimate()
-        .iter()
-        .map(|click| click.ratio() / max);
+    let click_estimate = (0..rot_len)
+        .map(|cell| {
+            experiment
+                .click_estimate()
+                .weight(CellId(cell as usize))
+                .recip()
+        })
+        .collect::<Vec<_>>();
 
     println!("Clickability matrix estimate:");
     println!(" N |   real  | estimate");

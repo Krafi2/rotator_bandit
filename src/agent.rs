@@ -14,7 +14,7 @@ pub struct Action(pub usize);
 
 /// The reward returned by the environment
 #[derive(Debug, Clone, Copy)]
-pub struct Reward(pub f32);
+pub struct Reward(pub bool, pub f32);
 
 /// A common trait for all agents
 pub trait Agent {
@@ -51,9 +51,11 @@ impl BetaParams {
     }
 
     pub fn update(&mut self, reward: Reward) {
-        let r = reward.0;
-        self.alpha += r;
-        self.beta += 1. - r;
+        let Reward(reward, weight) = reward;
+        let reward = reward as u32 as f32;
+        let a = weight * reward;
+        self.alpha += a;
+        self.beta += weight - a; // weight * (1. - reward)
     }
 }
 
@@ -110,7 +112,7 @@ impl Agent for ThompsonSampler {
     }
 
     fn optimal(&self) -> Reward {
-        Reward(self.optimal.1)
+        Reward(true, self.optimal.1)
     }
 }
 
@@ -184,9 +186,9 @@ impl<A: Agent> Agent for RegretLogger<A> {
 
     fn update(&mut self, a: Action, r: Reward) {
         self.agent.update(a, r);
-        let regret = self.agent.optimal().0 - r.0;
+        let regret = self.agent.optimal().1 - r.1;
         let mut logger = self.logger.take().expect("File is in use");
-        logger.update(r.0, regret);
+        logger.update(r.1, regret);
         self.logger.set(Some(logger));
     }
 
