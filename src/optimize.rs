@@ -53,6 +53,7 @@ pub fn dist_params(input: &Path, output: &Path, opts: DistParamOpts, eopts: Expe
     println!("0%");
     buffer
         .chunks_mut(width)
+        .rev()
         .enumerate()
         .collect::<Vec<_>>()
         .into_par_iter()
