@@ -3,7 +3,7 @@ mod experiment;
 mod optimize;
 
 use experiment::ExperimentOpts;
-use optimize::OptimizeOpts;
+use optimize::{DistParamOpts, TestpOpts};
 use std::path::PathBuf;
 
 pub type DefaultRng = rand_chacha::ChaCha8Rng;
@@ -13,7 +13,7 @@ const SEED: u64 = 0;
 /// The shape of the rotator
 const SHAPE: [u32; 2] = [5, 10];
 /// The number of trials per experiment
-const TRIALS: u32 = 1_000_000;
+const TRIALS: u32 = 10_000;
 /// The number of experiments
 const EXPERIMENTS: u32 = 1;
 /// How many points should be plotted to the graph
@@ -25,7 +25,7 @@ const INITIAL_ALPHA: f32 = 0.17;
 const INITIAL_BETA: f32 = 1.;
 
 /// The domain of alpha and beta params to search
-const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..1., 0.001..200.];
+const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..1., 0.001..100.];
 /// Width of the grid
 const WIDTH: usize = 16;
 /// Height of the grid
@@ -34,8 +34,12 @@ const HEIGHT: usize = 64;
 /// decrease noise at the cost of longer run time.
 const SAMPLES: u32 = 10;
 
+const TESTP_RES: usize = 1024;
+const TESTP_DOMAIN: std::ops::Range<f32> = 0. ..1.;
+
 enum Op {
-    Optimize,
+    OptimizeTestP,
+    OptimizeDist,
     Experiment,
 }
 
@@ -46,7 +50,8 @@ fn main() {
     let op = args
         .next()
         .map(|op| match op.as_str() {
-            "optimize" => Op::Optimize,
+            "optimize_dist" => Op::OptimizeDist,
+            "optimize_testp" => Op::OptimizeTestP,
             "experiment" => Op::Experiment,
             other => panic!("Unrecognized operation '{}'", other),
         })
@@ -75,15 +80,22 @@ fn main() {
         test_prob: TEST_PROB,
     };
 
-    let opts = OptimizeOpts {
+    let dist_opts = DistParamOpts {
         domain: DOMAIN,
         width: WIDTH,
         height: HEIGHT,
         samples: SAMPLES,
     };
 
+    let testp_opts = TestpOpts {
+        res: TESTP_RES,
+        domain: TESTP_DOMAIN,
+        samples: SAMPLES,
+    };
+
     match op {
-        Op::Optimize => optimize::optimize(&input, &output, opts, eopts),
+        Op::OptimizeDist => optimize::dist_params(&input, &output, dist_opts, eopts),
+        Op::OptimizeTestP => optimize::testp(&input, &output, testp_opts, eopts),
         Op::Experiment => experiment::experiment(&input, &output, EXPERIMENTS, GRAPH_POINTS, eopts),
     }
 }

@@ -36,7 +36,13 @@ pub struct BetaParams {
 impl BetaParams {
     /// Construct a new distribution from the parameters
     pub fn new_dist(&self) -> Beta<f32> {
-        Beta::new(self.alpha, self.beta).expect("Invalid parameters for beta distribution")
+        match Beta::new(self.alpha, self.beta) {
+            Err(_) => panic!(
+                "Invalid parameters for beta distribution (alpha: {}, beta: {})",
+                self.alpha, self.beta
+            ),
+            Ok(dist) => dist,
+        }
     }
 
     /// The mean of the distribution

@@ -399,6 +399,10 @@ impl<A: Agent> Experiment<A> {
     pub fn reward(&self) -> f32 {
         self.reward
     }
+
+    pub fn set_testp(&mut self, prob: f64) {
+        self.test_prob = prob;
+    }
 }
 
 impl<A: Clone> Experiment<A> {
