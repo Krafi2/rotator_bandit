@@ -109,11 +109,12 @@ pub struct Clickability {
     scale: f32,
 }
 
+const CLICK_BIAS: u32 = 1;
 impl Clickability {
     fn new(n: usize) -> Self {
         Self {
-            clicks: vec![1; n],
-            impressions: vec![1; n],
+            clicks: vec![CLICK_BIAS; n],
+            impressions: vec![CLICK_BIAS; n],
             scale: 1.,
         }
     }
@@ -134,10 +135,10 @@ impl Clickability {
 
     fn reset(&mut self) {
         for clicks in &mut self.clicks {
-            *clicks = 1;
+            *clicks = CLICK_BIAS;
         }
         for imp in &mut self.impressions {
-            *imp = 1;
+            *imp = CLICK_BIAS;
         }
         self.scale = 1.;
     }

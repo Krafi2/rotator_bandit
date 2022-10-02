@@ -18,11 +18,10 @@ const TRIALS: u32 = 10_000;
 const EXPERIMENTS: u32 = 1;
 /// How many points should be plotted to the graph
 const GRAPH_POINTS: u32 = 600;
-/// Probability of a trial being a test. Currently there is no reason to set it lower than 1 since
-/// all trials sample data randomly based on the probabilities in the dataset.
-const TEST_PROB: f64 = 0.01;
-const INITIAL_ALPHA: f32 = 0.75;
-const INITIAL_BETA: f32 = 92.;
+/// Probability of a trial being a test
+const TEST_PROB: f64 = 0.;
+const INITIAL_ALPHA: f32 = 0.4;
+const INITIAL_BETA: f32 = 80.;
 
 /// The domain of alpha and beta params to search
 const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..2., 0.001..100.];
@@ -34,8 +33,8 @@ const HEIGHT: usize = 64;
 /// decrease noise at the cost of longer run time.
 const SAMPLES: u32 = 10;
 
-const TESTP_RES: usize = 1024;
-const TESTP_DOMAIN: std::ops::Range<f32> = 0. ..1.;
+const TESTP_RES: usize = 100;
+const TESTP_DOMAIN: std::ops::Range<f32> = 0. ..0.02;
 
 enum Op {
     OptimizeTestP,

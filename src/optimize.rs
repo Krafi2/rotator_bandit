@@ -85,7 +85,7 @@ pub fn dist_params(input: &Path, output: &Path, opts: DistParamOpts, eopts: Expe
         let beta = origin[1] + y as f32 * ystep;
         for x in 0..width {
             let alpha = origin[0] + x as f32 * xstep;
-            let val = buffer[y * width + x];
+            let val = buffer[(height - y - 1) * width + x];
             if val < min {
                 min = val;
             }
@@ -112,7 +112,7 @@ pub fn dist_params(input: &Path, output: &Path, opts: DistParamOpts, eopts: Expe
         .expect("Failed to create image");
 
     image
-        .save(output.join("optimizer.png"))
+        .save(output.join("dist.png"))
         .expect("Failed to write image");
     println!("Optimization finished!");
     println!("Optimum found at alpha: {max_alpha}, beta: {max_beta}");
@@ -169,6 +169,7 @@ pub fn testp(input: &Path, output: &Path, opts: TestpOpts, eopts: ExperimentOpts
         OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(output.join("testp.csv"))
             .expect("Failed to open file"),
     );
@@ -176,16 +177,18 @@ pub fn testp(input: &Path, output: &Path, opts: TestpOpts, eopts: ExperimentOpts
     let mut max = 0.;
     let mut max_p = 0.;
     for (i, &r) in rewards.iter().enumerate() {
-        writeln!(&mut writer, "{}", r).unwrap();
+        let testp = domain.start + i as f32 * step;
+        writeln!(&mut writer, "{},{}", testp, r).unwrap();
         if r > max {
             max = r;
-            max_p = domain.start + i as f32 * step;
+            max_p = testp;
         }
     }
 
     println!("Optimum found at testp: {max_p}");
     println!("Generating  plot...");
 
+    writer.flush().unwrap();
     let exit = std::process::Command::new("python3")
         .args([
             "scripts/plot_testp.py".into(),
