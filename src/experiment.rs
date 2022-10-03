@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::agent::BetaParams;
 
 use super::agent::{Action, Agent, Reward};
@@ -7,14 +9,10 @@ use rand::{
     Rng, SeedableRng,
 };
 use rand_distr::Distribution;
-use std::cell::Cell;
-use std::io::BufRead;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 /// The data of a thumbnail
 #[derive(Debug, Clone)]
-pub struct Thumbnail {
+pub struct Thumb {
     /// The id of the thumbnail
     pub id: u32,
     /// Click through ratio
@@ -25,7 +23,8 @@ pub struct Thumbnail {
     pub impressions: u32,
 }
 
-impl Thumbnail {
+impl Thumb {
+    /// Construct a new `Thumb`
     pub fn new(id: u32, ctr: f64) -> Self {
         Self {
             id,
@@ -35,22 +34,42 @@ impl Thumbnail {
         }
     }
 
-    /// Register an imression
+    /// Register an impression
     fn impress(&mut self, click: bool) {
         self.impressions += 1;
         self.clicks += click as u32;
     }
 
+    /// Reset the data
     fn reset(&mut self) {
         self.clicks = 0;
         self.impressions = 0;
     }
 }
 
+/// The data of a video
 pub struct Video<A> {
-    thumbs: Vec<Thumbnail>,
+    /// Thumbnails
+    thumbs: Vec<Thumb>,
+    /// Agent for selecting thumbnails
     agent: A,
+    /// The path to the video data file
     path: PathBuf,
+}
+
+impl<A> Video<A> {
+    pub fn new(thumbs: Vec<Thumb>, agent: A, path: PathBuf) -> Self {
+        Self {
+            thumbs,
+            agent,
+            path,
+        }
+    }
+
+    /// Get the path to a specific thumbnail
+    pub fn thumb_path(&self, id: ThumbId) -> PathBuf {
+        self.path.join(format!("{:02}.png", self.thumbs[id.1].id))
+    }
 }
 
 impl<A: Clone> Clone for Video<A> {
@@ -73,23 +92,11 @@ impl<A: std::fmt::Debug> std::fmt::Debug for Video<A> {
     }
 }
 
-impl<A> Video<A> {
-    pub fn new(thumbs: Vec<Thumbnail>, agent: A, path: PathBuf) -> Self {
-        Self {
-            thumbs,
-            agent,
-            path,
-        }
-    }
-
-    pub fn thumb_path(&self, id: ThumbId) -> PathBuf {
-        self.path.join(format!("{:02}.png", self.thumbs[id.1].id))
-    }
-}
-
+/// Id of a `[Video]`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct VideoId(usize);
 
+/// Id of a `[Video]`'s `[Thumbnail]`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThumbId(VideoId, usize);
 
@@ -99,13 +106,18 @@ impl ThumbId {
     }
 }
 
+/// Id of a cell within the rotator
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CellId(usize);
+pub struct CellId(pub usize);
 
+/// Clickability data of a cell withing the rotator
 #[derive(Debug, Clone)]
 pub struct Clickability {
+    /// Number of clicks
     clicks: Vec<u32>,
+    /// Number of impressions
     impressions: Vec<u32>,
+    /// Clickability ration of the first cell. This is used to normalize the clickability matrix.
     scale: f32,
 }
 
@@ -119,20 +131,24 @@ impl Clickability {
         }
     }
 
+    /// Update the clickability of a cell with an impression
     fn update(&mut self, cell: CellId, click: bool) {
         let id = cell.0;
         self.clicks[id] += click as u32;
         self.impressions[id] += 1;
+        // If the target is the first cell, update the scale factor as well
         if id == 0 {
             self.scale = self.clicks[id] as f32 / self.impressions[id] as f32;
         }
     }
 
+    /// Get the weight of a cell. Note that this is the reciprocical of the clickability.
     pub fn weight(&self, cell: CellId) -> f32 {
         let id = cell.0;
         self.impressions[id] as f32 / self.clicks[id] as f32 * self.scale
     }
 
+    // Reset the data to the original state
     fn reset(&mut self) {
         for clicks in &mut self.clicks {
             *clicks = CLICK_BIAS;
@@ -144,6 +160,8 @@ impl Clickability {
     }
 }
 
+/// The "ratings" of the videos. This is used for populating the rotator in a way that places the
+/// best videos up front.
 #[derive(Debug, Clone)]
 struct Ratings {
     alpha: f32,
@@ -153,6 +171,7 @@ struct Ratings {
 }
 
 impl Ratings {
+    /// Construct a new `Ratings`
     fn new(n: usize, alpha: f32, beta: f32) -> Self {
         let params = BetaParams { alpha, beta };
         Self {
@@ -163,17 +182,22 @@ impl Ratings {
         }
     }
 
+    /// Reset the data to the initial state
     fn reset(&mut self) {
         *self = Self::new(self.dist.len(), self.alpha, self.beta)
     }
 
+    /// Update the rating of a video with a reward
     fn update(&mut self, id: VideoId, reward: Reward) {
         let dist = &mut self.dist_params[id.0];
         dist.update(reward);
         self.dist[id.0] = dist.new_dist();
     }
 
+    /// Choose a list of videos to populate the rotator
     fn choose(&self, n: usize, rng: &mut DefaultRng) -> Vec<VideoId> {
+        // This works essentially the same way as a normal Thompson sampler, but we take the `n`
+        // best value as opposed to a single one.
         let mut ratings = self
             .dist
             .iter()
@@ -185,6 +209,7 @@ impl Ratings {
     }
 }
 
+/// Experiment options
 pub struct ExperimentOpts {
     pub seed: u64,
     pub shape: [u32; 2],
@@ -194,21 +219,23 @@ pub struct ExperimentOpts {
     pub beta: f32,
 }
 
+/// The data of an experiment
 pub struct Experiment<A> {
+    /// Video ratings
     ratings: Ratings,
-    // Video data
+    /// Video data
     videos: Vec<Video<A>>,
-    // Shape of the rotator
+    /// Shape of the rotator
     shape: [u32; 2],
-    // Number of trials per experiment
+    /// Number of trials per experiment
     trials: u32,
-    // The real clickability matrix
+    /// The real clickability matrix
     clickability: Vec<f32>,
-    // Estimate of the clickability matrix
+    /// Estimate of the clickability matrix
     click_estimate: Clickability,
-    // Probabity of a test trial
+    /// Probabity of a test trial
     test_prob: f64,
-    // The accumulated reward
+    /// The accumulated reward
     reward: f32,
     rng: DefaultRng,
 }
@@ -245,6 +272,7 @@ impl<A: Clone> Clone for Experiment<A> {
 }
 
 impl<A: Agent> Experiment<A> {
+    /// Construct a new `Experiment`
     pub fn new(videos: Vec<Video<A>>, clickability: Vec<f32>, opts: ExperimentOpts) -> Self {
         Self {
             ratings: Ratings::new(videos.len(), opts.alpha, opts.beta),
@@ -259,6 +287,8 @@ impl<A: Agent> Experiment<A> {
         }
     }
 
+    /// Update a thumbnail with an impression. This also updates all the underlying mechanisms
+    /// which have to keep track of rewards.
     fn update_thumb(&mut self, thumb: ThumbId, cell: CellId, click: bool, test: bool) {
         // Update thumbnail data
         let vid = &mut self.videos[thumb.0 .0];
@@ -281,9 +311,12 @@ impl<A: Agent> Experiment<A> {
         vid.agent.update(Action(thumb.1), reward);
     }
 
+    /// Receive a list of impressions and clicks and perform the neccessary updates
     fn update(
         &mut self,
+        // A list of impressions
         mut impressions: Vec<(ThumbId, CellId)>,
+        // A list of clicks
         mut clicks: Vec<(ThumbId, CellId)>,
         test: bool,
     ) {
@@ -322,7 +355,7 @@ impl<A: Agent> Experiment<A> {
                     i += 1;
                     c += 1;
                 }
-                // Probably a bug
+                // Probably a bug. There was a click that had no associated impression.
                 std::cmp::Ordering::Greater => {
                     panic!("Click not contained in impressions")
                 }
@@ -330,9 +363,10 @@ impl<A: Agent> Experiment<A> {
         }
     }
 
+    /// Generate random impressions from the rotator for testing
     pub fn generate_test_impressions(&mut self) -> Vec<(ThumbId, CellId)> {
         let n = self.shape.iter().product::<u32>() as usize;
-        // Pick the videos that will be displayed
+        // Randomly pick the videos that will be displayed
         let mut videos = self
             .videos
             .iter_mut()
@@ -340,6 +374,7 @@ impl<A: Agent> Experiment<A> {
             .choose_multiple(&mut self.rng, n);
         videos.shuffle(&mut self.rng);
 
+        // Pick thumbnails to go with the videos
         videos
             .into_iter()
             .enumerate()
@@ -350,8 +385,10 @@ impl<A: Agent> Experiment<A> {
             .collect()
     }
 
+    /// Generate impressions from the rotator
     pub fn generate_impressions(&mut self) -> Vec<(ThumbId, CellId)> {
         let n = self.shape.iter().product::<u32>() as usize;
+        // Pick the videos and thumbnails that will be displayed
         self.ratings
             .choose(n, &mut self.rng)
             .into_iter()
@@ -364,7 +401,9 @@ impl<A: Agent> Experiment<A> {
             .collect()
     }
 
+    /// Run a trial
     fn run_trial(&mut self) {
+        // Generate impressions
         let test = self.rng.gen_bool(self.test_prob);
         let impressions = if test {
             self.generate_test_impressions()
@@ -372,6 +411,7 @@ impl<A: Agent> Experiment<A> {
             self.generate_impressions()
         };
 
+        // Generate clicks from the impressions
         let clicks = impressions
             .iter()
             .copied()
@@ -385,34 +425,46 @@ impl<A: Agent> Experiment<A> {
         self.update(impressions, clicks, test)
     }
 
+    /// Run the experiment
     pub fn run(&mut self) {
         for _ in 0..self.trials {
             self.run_trial()
         }
     }
 
+    /// Get the videos
     pub fn videos(&self) -> &[Video<A>] {
         self.videos.as_ref()
     }
 
+    /// Get the clickability
     pub fn clickability(&self) -> &[f32] {
         self.clickability.as_ref()
     }
 
+    /// Get the clickability estimate
     pub fn click_estimate(&self) -> &Clickability {
         &self.click_estimate
     }
 
+    /// Get the accumulated reward
     pub fn reward(&self) -> f32 {
         self.reward
     }
 
+    /// Set the test probability
     pub fn set_testp(&mut self, prob: f64) {
         self.test_prob = prob;
+    }
+
+    /// Get the rotator's shape
+    pub fn shape(&self) -> &[u32; 2] {
+        &self.shape
     }
 }
 
 impl<A: Clone> Experiment<A> {
+    /// Reset the experiment and replace the agents with clones of `agent`
     pub fn reset_with_agent(&mut self, agent: A, seed: u64) {
         self.reward = 0.;
         self.click_estimate.reset();
@@ -425,159 +477,4 @@ impl<A: Clone> Experiment<A> {
         self.ratings.reset();
         self.rng = DefaultRng::seed_from_u64(seed);
     }
-}
-
-pub fn experiment(
-    input: &Path,
-    output: &Path,
-    experiments: u32,
-    graph_points: u32,
-    opts: ExperimentOpts,
-) {
-    // Prepare the output directory
-    if !output.exists() {
-        std::fs::create_dir(&output).expect("Failed to create output directory");
-    }
-
-    // Only clean the output folder if the path is relative to avoid accidentaly deleting important
-    // files.
-    if output.is_relative() {
-        for entry in std::fs::read_dir(&output).expect("Failed to open output directory") {
-            if let Ok(entry) = entry {
-                // Delete only the thumbnail files
-                if entry.file_name().to_string_lossy().contains("thumbnails-") {
-                    if let Err(err) = std::fs::remove_file(entry.path()) {
-                        eprintln!("Error removing file: {}", err);
-                    }
-                }
-            }
-        }
-    }
-
-    let rot_len = opts.shape.iter().product::<u32>();
-    let logger = Rc::new(Cell::new(Some(crate::agent::Logger::new(
-        &output.join("regret.csv"),
-        experiments * opts.trials * rot_len / graph_points,
-    ))));
-
-    let videos = load_data(input.as_ref())
-        .map(|(path, thumbs)| {
-            let agent = crate::agent::ThompsonSampler::new(thumbs.len(), opts.alpha, opts.beta);
-            Video::new(
-                thumbs,
-                crate::agent::RegretLogger::new(agent, logger.clone()),
-                path,
-            )
-        })
-        .collect();
-
-    let clickability = clickability(&opts.shape);
-    let mut experiment = Experiment::new(videos, clickability, opts);
-
-    for e in 0..experiments {
-        experiment.run();
-        let img = rotator_snapshot(&mut experiment);
-        img.save(output.join(format!("thumbnails-{:02}.png", e)))
-            .expect("Failed to write thumbnails");
-        println!("Finished experiment {}", e);
-    }
-    let mut logger = logger.take().expect("Logfile is in use");
-
-    println!("Total reward: {}", logger.reward());
-    logger.flush().expect("Failed to flush log file");
-
-    let click_estimate = (0..rot_len)
-        .map(|cell| {
-            experiment
-                .click_estimate()
-                .weight(CellId(cell as usize))
-                .recip()
-        })
-        .collect::<Vec<_>>();
-
-    println!("Clickability matrix estimate:");
-    println!(" N |   real  | estimate");
-    for (i, (real, estimate)) in experiment
-        .clickability()
-        .into_iter()
-        .zip(click_estimate)
-        .enumerate()
-    {
-        println!("{:02} | {:.5} | {:.5}", i, real, estimate);
-    }
-
-    println!("Generating regret plot...");
-
-    let exit = std::process::Command::new("python3")
-        .args([
-            "scripts/regret.py".into(),
-            output.join("regret.csv"),
-            output.join("regret.png"),
-        ])
-        .spawn()
-        .and_then(|mut child| child.wait())
-        .expect("Failed to generate regret plot");
-
-    if exit.code().is_none() || exit.code().unwrap() != 0 {
-        println!("Regret graph generation failed!");
-    }
-
-    println!("Done!");
-}
-
-pub fn load_data(input: &Path) -> impl Iterator<Item = (PathBuf, Vec<Thumbnail>)> {
-    std::fs::read_dir(input)
-        .expect("Failed to read dir")
-        .map(|video| {
-            let path = video.unwrap().path();
-            let ctrs = path.join("ctrs.txt");
-
-            // Parse the thumbnail data from the csv file
-            let thumbs =
-                std::io::BufReader::new(std::fs::File::open(ctrs).expect("Failed to read input"))
-                    .lines()
-                    .map(|s| {
-                        let s = s.expect("Failed to read line");
-                        let sub = s.split(',').collect::<Vec<_>>();
-
-                        Thumbnail::new(sub[0].parse().unwrap(), sub[1].parse().unwrap())
-                    })
-                    .collect::<Vec<_>>();
-            (path, thumbs)
-        })
-}
-
-pub fn clickability(shape: &[u32; 2]) -> Vec<f32> {
-    let mat_len = shape.iter().product::<u32>() as usize;
-    (0..mat_len).map(|i| f32::powf(0.99, i as f32)).collect()
-}
-
-fn rotator_snapshot<A: Agent>(experiment: &mut Experiment<A>) -> image::RgbImage {
-    let impressions = experiment.generate_impressions();
-
-    let sample_thumb = impressions[0].0;
-    let sample_thumb =
-        image::open(experiment.videos()[sample_thumb.video()].thumb_path(sample_thumb))
-            .expect("Failed to read image");
-    let (img_width, img_height) = image::GenericImageView::dimensions(&sample_thumb);
-    let [width, height] = experiment.shape.clone();
-
-    let mut image = image::RgbImage::new(width * img_width, height * img_height);
-
-    for y in 0..height {
-        for x in 0..width {
-            let n = y * width + x;
-            let id = impressions[n as usize].0;
-            let path = experiment.videos()[id.video()].thumb_path(id);
-            let thumb = image::open(path).expect("Failed to read image").into_rgb8();
-            image::imageops::overlay(
-                &mut image,
-                &thumb,
-                (x * img_width) as i64,
-                (y * img_height) as i64,
-            );
-        }
-    }
-
-    image
 }

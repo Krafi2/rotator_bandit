@@ -1,9 +1,12 @@
+/// Agent implementation
 mod agent;
+/// Experiment implementation
 mod experiment;
-mod optimize;
+/// Run experiments and optimizations
+mod run;
 
 use experiment::ExperimentOpts;
-use optimize::{DistParamOpts, TestpOpts};
+use run::{DistParamOpts, TestpOpts};
 use std::path::PathBuf;
 
 pub type DefaultRng = rand_chacha::ChaCha8Rng;
@@ -33,24 +36,33 @@ const HEIGHT: usize = 64;
 /// decrease noise at the cost of longer run time.
 const SAMPLES: u32 = 10;
 
+/// The resolution of the test probability samples
 const TESTP_RES: usize = 100;
+/// The domain of the test probability
 const TESTP_DOMAIN: std::ops::Range<f32> = 0. ..0.02;
 
+/// Possible operations
 enum Op {
     OptimizeTestP,
     OptimizeDist,
     Experiment,
 }
 
+/// This is the program's entrypoint. We decide what operation the user wants to do and dispatch to
+/// another function.
 fn main() {
     let mut args = std::env::args();
     let _ = args.next();
 
+    // Match the first argument
     let op = args
         .next()
         .map(|op| match op.as_str() {
+            // Optimize initial distribution parameters
             "optimize_dist" => Op::OptimizeDist,
+            // Optimize test probability
             "optimize_testp" => Op::OptimizeTestP,
+            // Perform a number of experiments
             "experiment" => Op::Experiment,
             other => panic!("Unrecognized operation '{}'", other),
         })
@@ -69,6 +81,8 @@ fn main() {
         .expect("Expected an output argument")
         .parse::<PathBuf>()
         .unwrap();
+
+    // Pack the parameters into structs for better ergonomics
 
     let eopts = ExperimentOpts {
         alpha: INITIAL_ALPHA,
@@ -92,9 +106,10 @@ fn main() {
         samples: SAMPLES,
     };
 
+    // Dispatch
     match op {
-        Op::OptimizeDist => optimize::dist_params(&input, &output, dist_opts, eopts),
-        Op::OptimizeTestP => optimize::testp(&input, &output, testp_opts, eopts),
-        Op::Experiment => experiment::experiment(&input, &output, EXPERIMENTS, GRAPH_POINTS, eopts),
+        Op::OptimizeDist => run::dist_params(&input, &output, dist_opts, eopts),
+        Op::OptimizeTestP => run::testp(&input, &output, testp_opts, eopts),
+        Op::Experiment => run::experiment(&input, &output, EXPERIMENTS, GRAPH_POINTS, eopts),
     }
 }

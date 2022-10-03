@@ -12,7 +12,7 @@ use std::{
 #[derive(Debug, Clone, Copy)]
 pub struct Action(pub usize);
 
-/// The reward returned by the environment
+/// The reward returned by the environment. Either `1` or `0`, but with a weight.
 #[derive(Debug, Clone, Copy)]
 pub struct Reward(pub bool, pub f32);
 
@@ -23,7 +23,7 @@ pub trait Agent {
     /// Update the agent with the result of an action
     fn update(&mut self, a: Action, r: Reward);
     /// Get the expected optimal reward
-    fn optimal(&self) -> Reward;
+    fn optimal(&self) -> f32;
 }
 
 /// Parameters for a beta distribution
@@ -50,6 +50,7 @@ impl BetaParams {
         self.alpha / (self.alpha + self.beta)
     }
 
+    /// Update the distribution to better match the reward
     pub fn update(&mut self, reward: Reward) {
         let Reward(reward, weight) = reward;
         let reward = reward as u32 as f32;
@@ -69,13 +70,14 @@ impl Default for BetaParams {
     }
 }
 
-/// An agent which uses beta thompson sampling to
+/// An agent which uses beta thompson sampling to select actions
 #[derive(Debug, Clone)]
 pub struct ThompsonSampler {
     /// The params for the distributions
     dist_params: Vec<BetaParams>,
     /// The distributions used to choose actions
     dist: Vec<Beta<f32>>,
+    /// The index of the arm with the best mean reward, and the mean itself
     optimal: (usize, f32),
 }
 
@@ -93,10 +95,12 @@ impl ThompsonSampler {
 
 impl Agent for ThompsonSampler {
     fn choose(&self, rng: &mut DefaultRng) -> Action {
+        // Choose the action with the highest randomly sampled value
         let a = arg_max(self.dist.iter().map(|dist| dist.sample(rng)));
         Action(a)
     }
 
+    /// Update the distribution and optimal reward
     fn update(&mut self, a: Action, r: Reward) {
         let a = a.0;
         let dist = &mut self.dist_params[a];
@@ -111,24 +115,33 @@ impl Agent for ThompsonSampler {
         self.dist[a] = dist.new_dist();
     }
 
-    fn optimal(&self) -> Reward {
-        Reward(true, self.optimal.1)
+    /// The mean of the best performing arm
+    fn optimal(&self) -> f32 {
+        self.optimal.1
     }
 }
 
+/// A shared logger for writing regret data to a file
 pub struct Logger {
+    /// Accumulated regret
     accumulator: f32,
+    /// The number of impressions
     n: u32,
+    /// The number of samples to accumulate before writing to file
     samples: u32,
+    /// The file writer
     file: BufWriter<File>,
+    /// Reward accumulator
     reward: f32,
 }
 
 impl Logger {
+    /// Construct a new `Logger`
     pub fn new(path: &Path, samples: u32) -> Self {
         let file = File::options()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(path)
             .expect("Failed to open regret file");
 
@@ -141,7 +154,9 @@ impl Logger {
         }
     }
 
+    /// Update the logger with new data
     fn update(&mut self, reward: f32, regret: f32) {
+        // Write the accumulated samples to the file
         if self.n % self.samples == 0 {
             writeln!(&mut self.file, "{}, {}", self.n, self.accumulator)
                 .expect("Failed to write to file");
@@ -151,15 +166,18 @@ impl Logger {
         self.n += 1;
     }
 
+    /// Flush the writer
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.file.flush()
     }
 
+    /// Get the accumulated reward
     pub fn reward(&self) -> f32 {
         self.reward
     }
 }
 
+/// A wrapper around an agent that writes regret to a shared logger
 pub struct RegretLogger<A> {
     agent: A,
     logger: Rc<Cell<Option<Logger>>>,
@@ -174,6 +192,7 @@ impl<A: std::fmt::Debug> std::fmt::Debug for RegretLogger<A> {
 }
 
 impl<A> RegretLogger<A> {
+    /// Construct a new `RegretLogger`
     pub fn new(agent: A, logger: Rc<Cell<Option<Logger>>>) -> Self {
         Self { agent, logger }
     }
@@ -181,18 +200,21 @@ impl<A> RegretLogger<A> {
 
 impl<A: Agent> Agent for RegretLogger<A> {
     fn choose(&self, rng: &mut DefaultRng) -> Action {
+        // Delegate the choice to the agent
         self.agent.choose(rng)
     }
 
+    /// Update the underlying agent and the logger
     fn update(&mut self, a: Action, r: Reward) {
         self.agent.update(a, r);
-        let regret = self.agent.optimal().1 - r.1;
+        let regret = self.agent.optimal() - r.1;
         let mut logger = self.logger.take().expect("File is in use");
         logger.update(r.1, regret);
         self.logger.set(Some(logger));
     }
 
-    fn optimal(&self) -> Reward {
+    fn optimal(&self) -> f32 {
+        // Delegate the the agent
         self.agent.optimal()
     }
 }
