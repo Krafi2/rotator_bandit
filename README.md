@@ -31,5 +31,14 @@ beta params. The simulation uses data from `data/` and saves the resulting plot
 to `output/`.
 
 ```sh
-$ cargo run --release -- experiment data/ output/
+$ cargo run --release -- optimize_dist data/ output/
+```
+
+
+This will build the program and perform a grid search for the optimal test
+probability. The simulation uses data from `data/` and saves the resulting plot
+to `output/`.
+
+```sh
+$ cargo run --release -- optimize_testp data/ output/
 ```
