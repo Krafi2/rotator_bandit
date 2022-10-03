@@ -32,33 +32,35 @@ pub fn dist_params(input: &Path, output: &Path, opts: DistParamOpts, eopts: Expe
 
     let mut buffer = vec![0.; width * height];
     let progress = std::sync::atomic::AtomicU32::default();
+    let samples = width * height;
 
     // # Evaluate samples
 
     println!("Evaluating samples:");
     println!("0%");
     buffer
-        .chunks_mut(width)
+        .iter_mut()
         .enumerate()
         .collect::<Vec<_>>()
         .into_par_iter()
-        .for_each(|(y, row)| {
+        .for_each(|(i, val)| {
+            let x = i % width;
+            let y = height - i / width - 1;
             let mut experiment = experiment.clone();
-            let beta = origin[1] + (y - height - 1) as f32 * ystep;
-            for (x, val) in row.into_iter().enumerate() {
-                let alpha = origin[0] + x as f32 * xstep;
-                let mut reward = 0.;
-                for sample in 0..opts.samples {
-                    let agent = ThompsonSampler::new(arms, alpha, beta);
-                    experiment.reset_with_agent(agent, seed | sample as u64);
-                    experiment.run();
-                    reward += experiment.reward();
-                }
-                *val = reward / opts.samples as f32;
+            let beta = origin[1] + y as f32 * ystep;
+            let alpha = origin[0] + x as f32 * xstep;
+            let mut reward = 0.;
+            for sample in 0..opts.samples {
+                let agent = ThompsonSampler::new(arms, alpha, beta);
+                experiment.reset_with_agent(agent, seed | sample as u64);
+                experiment.run();
+                reward += experiment.reward();
             }
+            *val = reward / opts.samples as f32;
+
             let progress = progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if 100 * progress / height as u32 != 100 * (progress + 1) / height as u32 {
-                println!("{}%", 100 * (progress + 1) / height as u32);
+            if 100 * progress / samples as u32 != 100 * (progress + 1) / samples as u32 {
+                println!("{}%", 100 * (progress + 1) / samples as u32);
             }
         });
 

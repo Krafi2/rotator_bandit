@@ -29,12 +29,12 @@ const INITIAL_BETA: f32 = 80.;
 /// The domain of alpha and beta params to search
 const DOMAIN: [std::ops::Range<f32>; 2] = [0.001..2., 0.001..100.];
 /// Width of the grid
-const WIDTH: usize = 64;
+const WIDTH: usize = 16;
 /// Height of the grid
-const HEIGHT: usize = 64;
+const HEIGHT: usize = 16;
 /// Number of samples per pixel. The experiments are a bit noisy so try to increase this to
 /// decrease noise at the cost of longer run time.
-const SAMPLES: u32 = 10;
+const SAMPLES: u32 = 1;
 
 /// The resolution of the test probability samples
 const TESTP_RES: usize = 100;
